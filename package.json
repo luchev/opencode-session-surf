@@ -1,8 +1,14 @@
 {
   "name": "opencode-session-surf",
   "version": "0.1.0",
-  "private": true,
+  "description": "Session list sidebar plugin for opencode TUI with cross-instance status sync and fuzzy session switching",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luchev/opencode-session-surf.git"
+  },
   "type": "module",
+  "keywords": ["opencode", "opencode-plugin", "tui", "sessions", "sidebar"],
   "dependencies": {
     "@opencode-ai/plugin": "1.18.15",
     "@opencode-ai/sdk": "1.18.15",
