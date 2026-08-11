@@ -28,28 +28,34 @@ function ensureStatusDir(): void {
   } catch {}
 }
 
-function writeOwnStatuses(map: Map<string, SessionStatus>): void {
+function writeOwnStatuses(map: Map<string, SessionStatus>, waiting: string[]): void {
   try {
     ensureStatusDir();
     const file = join(STATUS_DIR, `${process.pid}.json`);
-    writeFileSync(file, JSON.stringify({ updated: Date.now(), statuses: Object.fromEntries(map) }));
+    writeFileSync(
+      file,
+      JSON.stringify({ updated: Date.now(), statuses: Object.fromEntries(map), waiting }),
+    );
   } catch {}
 }
 
-function readCrossInstanceStatuses(): Map<string, SessionStatus>[] {
+type RemoteBroadcast = { statuses: Map<string, SessionStatus>; waiting: string[] };
+
+function readCrossInstance(): RemoteBroadcast[] {
   try {
     ensureStatusDir();
     const ownFile = `${process.pid}.json`;
     const files = readdirSync(STATUS_DIR).filter((f: string) => f.endsWith(".json") && f !== ownFile);
-    const out: Map<string, SessionStatus>[] = [];
+    const out: RemoteBroadcast[] = [];
     for (const f of files) {
       try {
         const raw = JSON.parse(readFileSync(join(STATUS_DIR, f), "utf8")) as {
           updated?: number;
           statuses?: Record<string, SessionStatus>;
+          waiting?: string[];
         };
         if (!raw.updated || Date.now() - raw.updated > STALE_MS) continue;
-        out.push(new Map(Object.entries(raw.statuses ?? {})));
+        out.push({ statuses: new Map(Object.entries(raw.statuses ?? {})), waiting: raw.waiting ?? [] });
       } catch {}
     }
     return out;
@@ -60,13 +66,23 @@ function readCrossInstanceStatuses(): Map<string, SessionStatus>[] {
 
 // Union of busy signals: a session shows busy if ANY live instance reports it
 // busy, without letting other instances' idle knowledge override local truth.
-function mergeBusy(local: Map<string, SessionStatus>, remotes: Map<string, SessionStatus>[]): Map<string, SessionStatus> {
+function mergeBusy(local: Map<string, SessionStatus>, remotes: RemoteBroadcast[]): Map<string, SessionStatus> {
   const merged = new Map(local);
   for (const remote of remotes) {
-    for (const [id, status] of remote) {
+    for (const [id, status] of remote.statuses) {
       if (isBusy(status)) merged.set(id, status);
     }
   }
+  return merged;
+}
+
+// The SDK's SessionStatus has no "waiting" type - a session blocked on a
+// question/permission answer only ever reports as "busy" to other processes.
+// So waiting ids must be broadcast and unioned separately, or a session
+// waiting for input in one terminal shows as merely "working" everywhere else.
+function mergeWaiting(local: string[], remotes: RemoteBroadcast[]): Set<string> {
+  const merged = new Set(local);
+  for (const remote of remotes) for (const id of remote.waiting) merged.add(id);
   return merged;
 }
 
@@ -183,6 +199,7 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [statuses, setStatuses] = createSignal<Map<string, SessionStatus>>(new Map());
+  const [waitingIds, setWaitingIds] = createSignal<Set<string>>(new Set());
   const [tick, setTick] = createSignal(0);
 
   async function refresh() {
@@ -210,10 +227,23 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
     return m;
   }
 
+  function localWaitingIds(): string[] {
+    return sessions()
+      .filter(
+        (s) =>
+          props.api.state.session.question(s.id).length > 0 ||
+          props.api.state.session.permission(s.id).length > 0,
+      )
+      .map((s) => s.id);
+  }
+
   function commitStatuses() {
     const local = localStatusesFromState();
-    writeOwnStatuses(local);
-    setStatuses(mergeBusy(local, readCrossInstanceStatuses()));
+    const localWaiting = localWaitingIds();
+    writeOwnStatuses(local, localWaiting);
+    const remotes = readCrossInstance();
+    setStatuses(mergeBusy(local, remotes));
+    setWaitingIds(mergeWaiting(localWaiting, remotes));
     props.api.renderer.requestRender();
   }
 
@@ -235,16 +265,16 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   try {
     ensureStatusDir();
     watcher = fsWatch(STATUS_DIR, () => {
-      setStatuses(mergeBusy(localStatusesFromState(), readCrossInstanceStatuses()));
+      const remotes = readCrossInstance();
+      setStatuses(mergeBusy(localStatusesFromState(), remotes));
+      setWaitingIds(mergeWaiting(localWaitingIds(), remotes));
       props.api.renderer.requestRender();
     });
   } catch {
     // fs.watch unsupported here; POLL_MS interval still reconciles
   }
 
-  const isWaiting = (id: string) =>
-    props.api.state.session.question(id).length > 0 ||
-    props.api.state.session.permission(id).length > 0;
+  const isWaiting = (id: string) => waitingIds().has(id);
 
   const anyAnimated = createMemo(() =>
     sessions().some((s) => {
