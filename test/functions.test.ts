@@ -16,7 +16,7 @@ import {
 describe("framesFor", () => {
   test("returns frames for a known name", () => {
     expect(framesFor(SPINNERS, "arc", SPINNERS.dots)).toEqual(SPINNERS.arc);
-    expect(framesFor(WAITERS, "ellipsis", WAITERS.flash)).toEqual(WAITERS.ellipsis);
+    expect(framesFor(WAITERS, "ellipsis", WAITERS.emoji)).toEqual(WAITERS.ellipsis);
   });
   test("falls back to the default for unknown names and non-strings", () => {
     expect(framesFor(SPINNERS, "nope", SPINNERS.dots)).toEqual(SPINNERS.dots);

@@ -64,8 +64,8 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 
 | Option | Values | Default | Description |
 |---|---|---|---|
-| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `""` | `dots` | Working spinner style; `""` hides it |
-| `waiting` | `flash`, `ellipsis`, `question`, `pulse`, `block`, `""` | `flash` | Waiting-for-input indicator; `""` hides it |
+| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `""` | `dots` | Working spinner style; `""` hides it |
+| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
 | `marker` | `dot`, `square`, `arrow`, `star`, `none` | `dot` | Active-session marker glyph |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
