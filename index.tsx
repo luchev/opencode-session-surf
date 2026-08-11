@@ -29,14 +29,14 @@ export const SPINNERS: Record<SpinnerName, string[]> = {
   speed: ["󰾆", "󰓅", "󰾅", "󰓅"],
   none: [" "],
 };
-type WaitingName = "emoji" | "ellipsis" | "question" | "pulse" | "block" | "dots" | "eyeblink" | "bell" | "help" | "bulb" | "ghost" | "none";
+type WaitingName = "emoji" | "ellipsis" | "question" | "pulse" | "block" | "bounce" | "eyeblink" | "bell" | "help" | "bulb" | "ghost" | "none";
 export const WAITERS: Record<WaitingName, string[]> = {
   emoji: ["❓", "  "],
   ellipsis: ["…", "  "],
   question: ["?", " "],
   pulse: ["⣾", "⣿"],
   block: ["█", " "],
-  dots: ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"],
+  bounce: ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"],
   eyeblink: ["󰈈", "󰛐"],
   bell: ["󰂞", "󰂚"],
   help: ["󰠗", "󰆆"],
@@ -65,6 +65,15 @@ export function markerGlyph(value: unknown): string {
   if (value === "") return MARKERS.none;
   return typeof value === "string" && value in MARKERS ? MARKERS[value as MarkerName] : MARKERS.dot;
 }
+// Presets define a whole look and override the individual style options.
+// "combined" makes the marker and spinner share one cell: the current session
+// shows its marker glyph (no spinner), non-current sessions show the spinner.
+type Preset = { marker: string; waiting: string[]; spinner: string[]; combined: boolean };
+export const PRESETS: Record<string, Preset> = {
+  ping: { marker: "◉", waiting: WAITERS.bell, spinner: SPINNERS.arc, combined: true },
+  term: { marker: ">", waiting: ["...", "   "], spinner: ["-", "\\", "|", "/"], combined: true },
+  braille: { marker: "●", waiting: WAITERS.pulse, spinner: SPINNERS.dots, combined: false },
+};
 const WAIT_MS = 450;
 // Anything updated in the last 15 minutes is Active.
 const ACTIVE_MS = 15 * 60 * 1000;
@@ -222,6 +231,58 @@ export function shortDir(dir: string): string {
   return dir.startsWith(home) ? "~" + dir.slice(home.length) : dir;
 }
 
+// Fuzzy subsequence score of `query` against `target` (case-insensitive).
+// Returns -1 when the query is not a subsequence; higher is better. A match
+// at the start of the target, at a word boundary, or in a consecutive run
+// all score extra, so "srf" outranks "srfx" and "sf" for "surfer".
+export function fuzzyScore(query: string, target: string): number {
+  const q = query.toLowerCase().trim();
+  const t = target.toLowerCase();
+  if (q === "") return 0;
+  if (q.length > t.length) return -1;
+  if (t === q) return 1_000_000;
+  if (t.startsWith(q)) return 100_000 + t.length;
+  let score = 0;
+  let qi = 0;
+  let prev = -2;
+  let run = 0;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) continue;
+    qi++;
+    let s = 1;
+    if (ti === 0) s += 10;
+    else {
+      const before = t[ti - 1];
+      if (before === " " || before === "-" || before === "_" || before === "/" || before === ".") s += 8;
+    }
+    if (prev === ti - 1) {
+      run++;
+      s += 5 * run;
+    } else {
+      run = 0;
+    }
+    prev = ti;
+    score += s;
+  }
+  return qi < q.length ? -1 : score;
+}
+
+// Sessions matching `query`, best fuzzy match first. Ties — sessions with
+// the same name, for example — fall back to most recently updated on top.
+// An empty query returns everything, most recent first.
+export function fuzzyRank(query: string, sessions: SidebarSession[]): SidebarSession[] {
+  const q = query.trim();
+  if (q === "") return [...sessions].sort((a, b) => b.time.updated - a.time.updated);
+  const scored: { s: SidebarSession; score: number }[] = [];
+  for (const s of sessions) {
+    const score = Math.max(fuzzyScore(q, sessionTitle(s)), fuzzyScore(q, shortDir(s.directory)));
+    if (score >= 0) scored.push({ s, score });
+  }
+  return scored
+    .sort((a, b) => b.score - a.score || b.s.time.updated - a.s.time.updated)
+    .map((x) => x.s);
+}
+
 // Recent = the last BLOCK_MS of work plus the block of work right before it
 // (at most two 24h windows). Each window is anchored at the newest session in
 // that period, so the list stops once a second window has been collected.
@@ -254,6 +315,7 @@ type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" |
 export function SessionRow(props: {
   s: SidebarSession;
   isCurrent: boolean;
+  inActive: boolean;
   marker: string;
   waitingFrames: string[];
   spinnerFrames: string[];
@@ -263,6 +325,7 @@ export function SessionRow(props: {
   theme: RowTheme;
   onNavigate: () => void;
   openElsewhere: boolean;
+  combined: boolean;
 }) {
   const fg = () =>
     props.waiting()
@@ -273,9 +336,13 @@ export function SessionRow(props: {
           ? props.theme.primary
           : props.status()
             ? props.theme.success
-            : props.theme.text;
-  // Marker never renders empty: the cell stays reserved so titles keep a
-  // fixed column whether or not a spinner is showing. The has-status dot is
+            // Idle sessions are green while in the Active section; nothing
+            // in Active is white. Recent rows use the default text color.
+            : props.inActive
+              ? props.theme.success
+              : props.theme.text;
+  // Non-combined mode: the marker cell stays reserved so titles keep a
+  // fixed column whether or not a spinner shows. The has-status dot is
   // opt-in via the "openElsewhere" option (off by default).
   const marker = () =>
     props.isCurrent
@@ -283,20 +350,51 @@ export function SessionRow(props: {
       : props.openElsewhere && props.status() && !isBusy(props.status())
         ? "•"
         : " ";
+  // Combined mode (presets): the marker and spinner share one cell. The
+  // current session shows its glyph (never a spinner); non-current sessions
+  // show their waiting/working spinner; idle Active sessions get the dot.
+  const combinedDot = () =>
+    !props.isCurrent &&
+    !props.waiting() &&
+    !props.working() &&
+    ((props.combined && props.inActive) ||
+      (props.openElsewhere && props.status() && !isBusy(props.status())));
   return (
     <box paddingLeft={1} paddingRight={1} onMouseDown={(_e) => props.onNavigate()}>
       <box flexDirection="row">
-        <text fg={props.isCurrent ? props.theme.primary : fg()} wrapMode="none">
-          {marker()}
-        </text>
-        <box width={1}>
-          <Show when={props.waiting() && props.waitingFrames.length > 0}>
-            <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
-          </Show>
-          <Show when={props.working() && props.spinnerFrames.length > 0}>
-            <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
-          </Show>
-        </box>
+        <Show when={props.combined}>
+          <box width={1}>
+            <Show when={props.isCurrent}>
+              <text fg={props.theme.primary} wrapMode="none">
+                {props.marker}
+              </text>
+            </Show>
+            <Show when={!props.isCurrent && props.waiting() && props.waitingFrames.length > 0}>
+              <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
+            </Show>
+            <Show when={!props.isCurrent && !props.waiting() && props.working() && props.spinnerFrames.length > 0}>
+              <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
+            </Show>
+            <Show when={combinedDot()}>
+              <text fg={props.theme.success} wrapMode="none">
+                •
+              </text>
+            </Show>
+          </box>
+        </Show>
+        <Show when={!props.combined}>
+          <text fg={props.isCurrent ? props.theme.primary : fg()} wrapMode="none">
+            {marker()}
+          </text>
+          <box width={1}>
+            <Show when={props.waiting() && props.waitingFrames.length > 0}>
+              <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
+            </Show>
+            <Show when={props.working() && props.spinnerFrames.length > 0}>
+              <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
+            </Show>
+          </box>
+        </Show>
         <text fg={fg()} wrapMode="none">
           {" "}
           {sessionTitle(props.s)}
@@ -318,6 +416,7 @@ function SidebarSessions(props: {
   marker: string;
   pollMs: number;
   openElsewhere: boolean;
+  combined: boolean;
 }) {
   const theme = props.api.theme.current;
   const [sessions, setSessions] = createSignal<SidebarSession[]>([]);
@@ -443,10 +542,11 @@ function SidebarSessions(props: {
     return sessions().filter((s) => !activeIds().has(s.id) && ids.has(s.id));
   });
 
-  const renderRow = (s: SidebarSession) => (
+  const renderRow = (s: SidebarSession, inActive: boolean) => (
     <SessionRow
       s={s}
       isCurrent={s.id === props.session_id}
+      inActive={inActive}
       marker={props.marker}
       waitingFrames={props.waiting}
       spinnerFrames={props.spinner}
@@ -456,6 +556,7 @@ function SidebarSessions(props: {
       theme={theme}
       onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
       openElsewhere={props.openElsewhere}
+      combined={props.combined}
     />
   );
 
@@ -485,7 +586,7 @@ function SidebarSessions(props: {
         <box flexDirection="column">
           {header("active", "Active")}
           <Show when={!collapsed().has("active")}>
-            <For each={active()}>{(s) => renderRow(s)}</For>
+            <For each={active()}>{(s) => renderRow(s, true)}</For>
           </Show>
         </box>
       </Show>
@@ -493,7 +594,7 @@ function SidebarSessions(props: {
         <box flexDirection="column">
           {header("recent", "Recent")}
           <Show when={!collapsed().has("recent")}>
-            <For each={recent()}>{(s) => renderRow(s)}</For>
+            <For each={recent()}>{(s) => renderRow(s, false)}</For>
           </Show>
         </box>
       </Show>
@@ -517,19 +618,27 @@ function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
   if (next) api.route.navigate("session", { sessionID: next.id });
 }
 
-// DialogSelect already does substring/fuzzy filtering over option titles, so
-// no custom fuzzy-match algorithm is needed here.
+// The host's DialogSelect only substring-matches option titles. We render it
+// with skipFilter so it shows exactly the options we hand it, and re-rank
+// them with our own fuzzy matcher (score desc, most recent on top) whenever
+// the query changes via onFilter.
 function openPicker(api: TuiPluginApi): void {
+  const [query, setQuery] = createSignal("");
+  const options = createMemo(() =>
+    fuzzyRank(query(), dbSessions()).map((s) => ({
+      title: sessionTitle(s),
+      value: s.id,
+      description: `${relTime(s.time.updated)} · ${shortDir(s.directory)}`,
+    })),
+  );
   api.ui.dialog.replace(() => (
     <api.ui.DialogSelect
       title="Switch Session"
       placeholder="Search sessions..."
       current={currentSessionID(api)}
-      options={dbSessions().map((s) => ({
-        title: sessionTitle(s),
-        value: s.id,
-        description: `${relTime(s.time.updated)} · ${shortDir(s.directory)}`,
-      }))}
+      options={options()}
+      skipFilter
+      onFilter={(q) => setQuery(q)}
       onSelect={(opt) => {
         api.ui.dialog.clear();
         api.route.navigate("session", { sessionID: opt.value });
@@ -547,6 +656,13 @@ const plugin: TuiPluginModule = {
     const waiting = framesFor(WAITERS, options?.waiting, WAITERS.pulse);
     const marker = markerGlyph(options?.marker);
     const openElsewhere = options?.openElsewhere === true;
+    // Presets define the whole look and override the individual style
+    // options; unknown preset names fall back to the individual options.
+    const preset = typeof options?.preset === "string" ? PRESETS[options.preset] : undefined;
+    const spinnerFrames = preset?.spinner ?? spinner;
+    const waitingFrames = preset?.waiting ?? waiting;
+    const markerGlyphName = preset?.marker ?? marker;
+    const combined = preset?.combined ?? false;
     const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     api.slots.register({
       order: 300,
@@ -556,11 +672,12 @@ const plugin: TuiPluginModule = {
             <SidebarSessions
               api={api}
               session_id={props.session_id}
-              spinner={spinner}
-              waiting={waiting}
-              marker={marker}
+              spinner={spinnerFrames}
+              waiting={waitingFrames}
+              marker={markerGlyphName}
               pollMs={pollMs}
               openElsewhere={openElsewhere}
+              combined={combined}
             />
           );
         },

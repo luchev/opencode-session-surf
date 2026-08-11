@@ -44,6 +44,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(frame).toContain(SPINNERS.arc[0]);
@@ -65,6 +67,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(frame).toContain("✦");
@@ -85,6 +89,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(frame).toContain(WAITERS.ellipsis[0]);
@@ -105,6 +111,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(frame).not.toContain("●");
@@ -126,6 +134,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={true}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(frame).toContain("•");
@@ -145,6 +155,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(frame).not.toContain("•");
@@ -165,6 +177,8 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     const idle = await frameFor(() => (
@@ -180,8 +194,102 @@ describe("SessionRow", () => {
         theme={theme}
         onNavigate={() => {}}
         openElsewhere={false}
+        inActive={false}
+        combined={false}
       />
     ));
     expect(busy.indexOf("surfer")).toBe(idle.indexOf("surfer"));
+  });
+});
+
+describe("SessionRow combined mode (ping preset)", () => {
+  test("current row shows the marker, never the spinner", async () => {
+    const frame = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={true}
+        inActive={true}
+        marker="◉"
+        waitingFrames={WAITERS.bell}
+        spinnerFrames={SPINNERS.arc}
+        waiting={() => false}
+        working={() => true}
+        status={() => status("busy")}
+        theme={theme}
+        onNavigate={() => {}}
+        openElsewhere={false}
+        combined={true}
+      />
+    ));
+    expect(frame).toContain("◉");
+    expect(frame).not.toContain(SPINNERS.arc[0]);
+    expect(frame).toContain("surfer");
+  });
+
+  test("non-current working row shows the spinner, not the marker", async () => {
+    const frame = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={false}
+        inActive={true}
+        marker="◉"
+        waitingFrames={WAITERS.bell}
+        spinnerFrames={SPINNERS.arc}
+        waiting={() => false}
+        working={() => true}
+        status={() => status("busy")}
+        theme={theme}
+        onNavigate={() => {}}
+        openElsewhere={false}
+        combined={true}
+      />
+    ));
+    expect(frame).toContain(SPINNERS.arc[0]);
+    expect(frame).not.toContain("◉");
+    expect(frame).toContain("surfer");
+  });
+
+  test("non-current idle Active row shows the • dot", async () => {
+    const frame = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={false}
+        inActive={true}
+        marker="◉"
+        waitingFrames={[]}
+        spinnerFrames={[]}
+        waiting={() => false}
+        working={() => false}
+        status={() => undefined}
+        theme={theme}
+        onNavigate={() => {}}
+        openElsewhere={false}
+        combined={true}
+      />
+    ));
+    expect(frame).toContain("•");
+    expect(frame).toContain("surfer");
+  });
+
+  test("non-current idle Recent row shows no dot", async () => {
+    const frame = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={false}
+        inActive={false}
+        marker="◉"
+        waitingFrames={[]}
+        spinnerFrames={[]}
+        waiting={() => false}
+        working={() => false}
+        status={() => undefined}
+        theme={theme}
+        onNavigate={() => {}}
+        openElsewhere={false}
+        combined={true}
+      />
+    ));
+    expect(frame).not.toContain("•");
+    expect(frame).toContain("surfer");
   });
 });

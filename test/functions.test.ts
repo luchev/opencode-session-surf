@@ -3,9 +3,12 @@ import type { SessionStatus } from "@opencode-ai/sdk";
 import stringWidth from "string-width";
 import {
   MARKERS,
+  PRESETS,
   SPINNERS,
   WAITERS,
   framesFor,
+  fuzzyRank,
+  fuzzyScore,
   isBusy,
   markerGlyph,
   recentSessions,
@@ -54,6 +57,34 @@ describe("MARKERS", () => {
       if (glyph === "") continue; // none
       expect(stringWidth(glyph), `${name} (${glyph})`).toBe(1);
     }
+  });
+});
+
+describe("PRESETS", () => {
+  test("every preset marker glyph is exactly 1 cell wide", () => {
+    for (const [name, p] of Object.entries(PRESETS)) {
+      expect(stringWidth(p.marker), `${name} marker (${p.marker})`).toBe(1);
+    }
+  });
+  test("ping uses ping marker, bell waiting, arc spinner, combined", () => {
+    const p = PRESETS.ping;
+    expect(p.marker).toBe("◉");
+    expect(p.waiting).toBe(WAITERS.bell);
+    expect(p.spinner).toBe(SPINNERS.arc);
+    expect(p.combined).toBe(true);
+  });
+  test("term is pure ASCII and combined", () => {
+    const p = PRESETS.term;
+    expect(p.marker).toBe(">");
+    expect(p.spinner).toEqual(["-", "\\", "|", "/"]);
+    expect(p.combined).toBe(true);
+  });
+  test("braille uses dot marker, pulse waiting, dots spinner, not combined", () => {
+    const p = PRESETS.braille;
+    expect(p.marker).toBe(MARKERS.dot);
+    expect(p.waiting).toBe(WAITERS.pulse);
+    expect(p.spinner).toBe(SPINNERS.dots);
+    expect(p.combined).toBe(false);
   });
 });
 
@@ -160,5 +191,60 @@ describe("shortDir", () => {
     process.env.HOME = "/Users/z";
     expect(shortDir("/Users/z/opencode-session-surf")).toBe("~/opencode-session-surf");
     expect(shortDir("/tmp/other")).toBe("/tmp/other");
+  });
+});
+
+describe("fuzzyScore", () => {
+  test("returns -1 for non-subsequences and empty targets", () => {
+    expect(fuzzyScore("xyz", "surfer")).toBe(-1);
+    expect(fuzzyScore("a", "")).toBe(-1);
+  });
+  test("matches subsequences case-insensitively", () => {
+    expect(fuzzyScore("srf", "surfer")).toBeGreaterThan(0);
+    expect(fuzzyScore("SRF", "Surfer")).toBeGreaterThan(0);
+  });
+  test("prefers exact, then prefix, then word-start matches", () => {
+    expect(fuzzyScore("surfer", "surfer")).toBeGreaterThan(fuzzyScore("sur", "surfer"));
+    expect(fuzzyScore("sur", "surfer")).toBeGreaterThan(fuzzyScore("srf", "surfer"));
+  });
+});
+
+describe("fuzzyRank", () => {
+  const t = (id: string, title: string, updated: number) => ({
+    id,
+    projectID: "p",
+    directory: "/x",
+    title,
+    time: { created: 0, updated },
+  });
+  test("empty query returns all sessions most recent first", () => {
+    const s = [t("a", "old", 100), t("b", "new", 200)];
+    expect(fuzzyRank("", s).map((x) => x.id)).toEqual(["b", "a"]);
+  });
+  test("ranks by fuzzy score, then recency for close matches", () => {
+    const s = [
+      t("oldest", "my project", 100),
+      t("newer", "my project", 300),
+      t("other", "something else", 200),
+    ];
+    const r = fuzzyRank("my pro", s);
+    expect(r[0].id).toBe("newer");
+    expect(r[1].id).toBe("oldest");
+  });
+  test("drops non-matching sessions", () => {
+    const s = [t("a", "alpha", 1), t("b", "beta", 2)];
+    expect(fuzzyRank("zzz", s)).toEqual([]);
+  });
+  test("matches the directory as a fallback target", () => {
+    const s = [
+      {
+        id: "a",
+        projectID: "p",
+        directory: "/Users/z/opencode-session-surf",
+        title: "New Session",
+        time: { created: 0, updated: 1 },
+      },
+    ];
+    expect(fuzzyRank("session-surf", s)).toHaveLength(1);
   });
 });
