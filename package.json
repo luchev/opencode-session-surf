@@ -8,9 +8,21 @@
     "url": "git+https://github.com/luchev/opencode-session-surf.git"
   },
   "type": "module",
-  "main": "./index.tsx",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    "./tui": "./index.tsx"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid && cp index.d.ts dist/",
+    "dev": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid --watch",
+    "prepublishOnly": "bun run build"
   },
   "keywords": ["opencode", "opencode-plugin", "tui", "sessions", "sidebar"],
   "dependencies": {
