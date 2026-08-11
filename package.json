@@ -8,6 +8,10 @@
     "url": "git+https://github.com/luchev/opencode-session-surf.git"
   },
   "type": "module",
+  "main": "./index.tsx",
+  "exports": {
+    "./tui": "./index.tsx"
+  },
   "keywords": ["opencode", "opencode-plugin", "tui", "sessions", "sidebar"],
   "dependencies": {
     "@opencode-ai/plugin": "1.18.15",
