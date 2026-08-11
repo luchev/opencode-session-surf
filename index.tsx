@@ -1,21 +1,57 @@
 /// <reference path="./bun-sqlite.d.ts" />
 /** @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, onCleanup, For, Show } from "solid-js";
-import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
+import type { TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { Database } from "bun:sqlite";
-import { mkdirSync, readdirSync, readFileSync, watch as fsWatch, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, appendFileSync, watch as fsWatch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const POLL_MS = 10_000;
-const RECENT_MS = 24 * 60 * 60 * 1000;
-const SPINNER_FRAMES = ["▁", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"];
+const POLL_MS = 3_000;
+// A "work block" window: Recent shows the last BLOCK_MS of work plus the
+// block of work immediately before it, so a quiet gap (e.g. a weekend)
+// doesn't hide the previous batch of sessions.
+const BLOCK_MS = 24 * 60 * 60 * 1000;
 const SPINNER_MS = 150;
-// Waiting-for-input flash: two frames at 450ms = the old tick()/3 flash cadence.
-const WAIT_FRAMES = ["❓", "  "];
+// Named styles, selectable via plugin options ({"spinner": "dots", "waiting": "flash", "marker": "dot"}).
+type SpinnerName = "dots" | "arc" | "sweep" | "fill" | "bounce" | "sparkle";
+export const SPINNERS: Record<SpinnerName, string[]> = {
+  dots: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+  arc: ["◜", "◝", "◞", "◟"],
+  sweep: ["◐", "◓", "◑", "◒"],
+  fill: ["░", "▒", "▓", "█"],
+  bounce: ["⠁", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"],
+  sparkle: ["✶", "✸", "✹", "✺", "✹", "✸"],
+};
+type WaitingName = "flash" | "ellipsis" | "question" | "pulse" | "block";
+export const WAITERS: Record<WaitingName, string[]> = {
+  flash: ["❓", "  "],
+  ellipsis: ["…", "  "],
+  question: ["?", " "],
+  pulse: ["⣾", "⣿"],
+  block: ["█", " "],
+};
+type MarkerName = "dot" | "square" | "arrow" | "star" | "none";
+export const MARKERS: Record<MarkerName, string> = {
+  dot: "●",
+  square: "▪",
+  arrow: "▶",
+  star: "✦",
+  none: "",
+};
+// Empty string hides the indicator; unknown names fall back to the default.
+export function framesFor(map: Record<string, string[]>, value: unknown, fallback: string[]): string[] {
+  if (value === "") return [];
+  return typeof value === "string" && value in map ? map[value] : fallback;
+}
+export function markerGlyph(value: unknown): string {
+  if (value === "") return MARKERS.none;
+  return typeof value === "string" && value in MARKERS ? MARKERS[value as MarkerName] : MARKERS.dot;
+}
 const WAIT_MS = 450;
-const ACTIVE_MS = 2 * 60 * 1000;
+// Anything updated in the last 15 minutes is Active.
+const ACTIVE_MS = 15 * 60 * 1000;
 const DB_PATH = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
 
 // Cross-instance busy-status broadcast: each opencode process writes its own
@@ -24,6 +60,19 @@ const DB_PATH = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
 // no manual cleanup is needed; stale entries are ignored by age.
 const STATUS_DIR = join(tmpdir(), "opencode-session-surf-status");
 const STALE_MS = POLL_MS * 3;
+
+// Opt-in diagnostics: {"debug": true} appends STATUS_DIR/debug.log (OS temp dir, no cleanup needed).
+let debugEnabled = false;
+function setDebug(enabled: boolean): void {
+  debugEnabled = enabled;
+}
+function debugLog(line: string): void {
+  if (!debugEnabled) return;
+  try {
+    mkdirSync(STATUS_DIR, { recursive: true });
+    appendFileSync(join(STATUS_DIR, "debug.log"), `${new Date().toISOString()} ${line}\n`);
+  } catch {}
+}
 
 function ensureStatusDir(): void {
   try {
@@ -44,7 +93,7 @@ function writeOwnStatuses(map: Map<string, SessionStatus>, waiting: string[]): v
 
 type RemoteBroadcast = { statuses: Map<string, SessionStatus>; waiting: string[] };
 
-function readCrossInstance(): RemoteBroadcast[] {
+function readCrossInstance(staleMs = STALE_MS): RemoteBroadcast[] {
   try {
     ensureStatusDir();
     const ownFile = `${process.pid}.json`;
@@ -57,7 +106,7 @@ function readCrossInstance(): RemoteBroadcast[] {
           statuses?: Record<string, SessionStatus>;
           waiting?: string[];
         };
-        if (!raw.updated || Date.now() - raw.updated > STALE_MS) continue;
+        if (!raw.updated || Date.now() - raw.updated > staleMs) continue;
         out.push({ statuses: new Map(Object.entries(raw.statuses ?? {})), waiting: raw.waiting ?? [] });
       } catch {}
     }
@@ -134,8 +183,8 @@ function dbSessions(): SidebarSession[] {
   }));
 }
 
-function relTime(ts: number): string {
-  const diff = Date.now() - ts;
+export function relTime(ts: number, now = Date.now()): string {
+  const diff = now - ts;
   const m = Math.floor(diff / 60_000);
   if (m < 1) return "now";
   if (m < 60) return `${m}m`;
@@ -145,64 +194,117 @@ function relTime(ts: number): string {
   return `${d}d`;
 }
 
-function dayGroup(ts: number): string {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
-  const start = startOfDay.getTime();
-  if (ts >= start) return "Today";
-  if (ts >= start - 86_400_000) return "Yesterday";
-  const week = start - 7 * 86_400_000;
-  if (ts >= week) return "This Week";
-  const month = start - 30 * 86_400_000;
-  if (ts >= month) return "This Month";
-  return "Older";
-}
-
-function sessionTitle(s: SidebarSession): string {
+export function sessionTitle(s: SidebarSession): string {
   const t = s.title?.trim();
   if (t && t !== "New Session") return t;
   const parts = s.directory.split("/").filter(Boolean);
   return parts[parts.length - 1] || s.id.slice(0, 8);
 }
 
-function shortDir(dir: string): string {
+export function shortDir(dir: string): string {
   const home = process.env.HOME ?? "";
   return dir.startsWith(home) ? "~" + dir.slice(home.length) : dir;
 }
 
-type Grouped = { label: string; sessions: SidebarSession[] };
-
-function groupSessions(sessions: SidebarSession[]): Grouped[] {
-  const groups = new Map<string, SidebarSession[]>();
-  for (const s of sessions) {
-    const label = dayGroup(s.time.updated);
-    const arr = groups.get(label);
-    if (arr) arr.push(s);
-    else groups.set(label, [s]);
-  }
-  const order = ["Today", "Yesterday", "This Week", "This Month", "Older"];
-  const out: Grouped[] = [];
-  for (const label of order) {
-    const arr = groups.get(label);
-    if (arr) {
-      arr.sort((a, b) => b.time.updated - a.time.updated);
-      out.push({ label, sessions: arr });
+// Recent = the last BLOCK_MS of work plus the block of work right before it
+// (at most two 24h windows). Each window is anchored at the newest session in
+// that period, so the list stops once a second window has been collected.
+export function recentSessions(sessions: SidebarSession[], now = Date.now()): SidebarSession[] {
+  const sorted = [...sessions].sort((a, b) => b.time.updated - a.time.updated);
+  if (sorted.length === 0) return [];
+  const out: SidebarSession[] = [];
+  let upper = Math.min(sorted[0].time.updated, now);
+  for (let w = 0; w < 2; w++) {
+    const lower = upper - BLOCK_MS;
+    for (const s of sorted) {
+      if (s.time.updated >= lower && s.time.updated <= upper) out.push(s);
+      else if (s.time.updated < lower) break;
     }
+    const next = sorted.find((s) => s.time.updated < lower);
+    if (!next) break;
+    upper = next.time.updated;
   }
   return out;
 }
 
-function isBusy(status: SessionStatus | undefined): boolean {
+export function isBusy(status: SessionStatus | undefined): boolean {
   return status?.type === "busy" || status?.type === "retry";
 }
 
-function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
+type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" | "primary" | "success">;
+
+// One sidebar row. Marker/spinner getters stay reactive to signal changes;
+// exported for direct testing.
+export function SessionRow(props: {
+  s: SidebarSession;
+  isCurrent: boolean;
+  marker: string;
+  waitingFrames: string[];
+  spinnerFrames: string[];
+  waiting: () => boolean;
+  working: () => boolean;
+  status: () => SessionStatus | undefined;
+  theme: RowTheme;
+  onNavigate: () => void;
+}) {
+  const fg = () =>
+    props.waiting()
+      ? props.theme.accent
+      : props.working()
+        ? props.theme.info
+        : props.isCurrent
+          ? props.theme.primary
+          : props.status()
+            ? props.theme.success
+            : props.theme.text;
+  const marker = () =>
+    props.isCurrent
+      ? props.marker
+      : props.status() && !isBusy(props.status())
+        ? "•"
+        : props.waiting() || props.working()
+          ? ""
+          : " ";
+  return (
+    <box paddingLeft={1} paddingRight={1} onMouseDown={(_e) => props.onNavigate()}>
+      <box flexDirection="row">
+        <text fg={props.isCurrent ? props.theme.primary : fg()} wrapMode="none">
+          {marker()}
+        </text>
+        <Show when={props.waiting() && props.waitingFrames.length > 0}>
+          <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
+        </Show>
+        <Show when={props.working() && props.spinnerFrames.length > 0}>
+          <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
+        </Show>
+        <text fg={fg()} wrapMode="none">
+          {" "}
+          {sessionTitle(props.s)}
+        </text>
+      </box>
+      <text fg={props.theme.textMuted} wrapMode="none">
+        {" "}
+        {relTime(props.s.time.updated)} · {shortDir(props.s.directory)}
+      </text>
+    </box>
+  );
+}
+
+function SidebarSessions(props: {
+  api: TuiPluginApi;
+  session_id: string;
+  spinner: string[];
+  waiting: string[];
+  marker: string;
+  pollMs: number;
+}) {
   const theme = props.api.theme.current;
   const [sessions, setSessions] = createSignal<SidebarSession[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [statuses, setStatuses] = createSignal<Map<string, SessionStatus>>(new Map());
   const [waitingIds, setWaitingIds] = createSignal<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
 
   async function refresh() {
     try {
@@ -210,6 +312,7 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      debugLog(`refresh error: ${String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -243,9 +346,11 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
     const local = localStatusesFromState();
     const localWaiting = localWaitingIds();
     writeOwnStatuses(local, localWaiting);
-    const remotes = readCrossInstance();
-    setStatuses(mergeBusy(local, remotes));
+    const remotes = readCrossInstance(props.pollMs * 3);
+    const merged = mergeBusy(local, remotes);
+    setStatuses(merged);
     setWaitingIds(mergeWaiting(localWaiting, remotes));
+    debugLog(`statuses busy=${[...merged.values()].filter(isBusy).length} waiting=${waitingIds().size}`);
     props.api.renderer.requestRender();
   }
 
@@ -259,7 +364,7 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   const timer = setInterval(() => {
     refresh();
     commitStatuses();
-  }, POLL_MS);
+  }, props.pollMs);
 
   const unsubStatus = props.api.event.on("session.status", () => commitStatuses());
 
@@ -267,7 +372,7 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   try {
     ensureStatusDir();
     watcher = fsWatch(STATUS_DIR, () => {
-      const remotes = readCrossInstance();
+    const remotes = readCrossInstance(props.pollMs * 3);
       setStatuses(mergeBusy(localStatusesFromState(), remotes));
       setWaitingIds(mergeWaiting(localWaitingIds(), remotes));
       props.api.renderer.requestRender();
@@ -278,6 +383,22 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
 
   const isWaiting = (id: string) => waitingIds().has(id);
 
+  const toggleCollapsed = (key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const header = (key: string, label: string) => (
+    <box paddingLeft={1} paddingTop={1} onMouseDown={() => toggleCollapsed(key)}>
+      <text fg={theme.textMuted}>
+        {collapsed().has(key) ? "▶" : "▼"} {label}
+      </text>
+    </box>
+  );
+
   onCleanup(() => {
     unsub();
     unsubStatus();
@@ -287,6 +408,8 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
 
   const active = createMemo(() =>
     sessions().filter((s) => {
+      // the session you're in is always Active, regardless of status/freshness
+      if (s.id === props.session_id) return true;
       const st = statuses().get(s.id);
       const fresh = s.time.updated >= Date.now() - ACTIVE_MS;
       return isBusy(st) || isWaiting(s.id) || fresh;
@@ -295,63 +418,28 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   const activeIds = createMemo(() => new Set(active().map((s) => s.id)));
 
   const recent = createMemo(() => {
-    const cutoff = Date.now() - RECENT_MS;
-    return sessions().filter((s) => !activeIds().has(s.id) && s.time.updated >= cutoff);
+    const ids = new Set(recentSessions(sessions(), Date.now()).map((s) => s.id));
+    return sessions().filter((s) => !activeIds().has(s.id) && ids.has(s.id));
   });
-  const recentGrouped = createMemo(() => groupSessions(recent()));
 
-  const renderRow = (s: SidebarSession) => {
-    const isCurrent = s.id === props.session_id;
-    // fg/marker MUST stay as getters (not pre-computed values) so the JSX
-    // compiler keeps them reactive to statuses() - <For> only recreates a row
-    // when the session object identity changes, so a plain computed value here
-    // would freeze at whatever it was on first mount.
-    const waiting = () => isWaiting(s.id);
-    const working = () => !waiting() && isBusy(statuses().get(s.id));
-    const status = () => statuses().get(s.id);
-    const fg = () =>
-      waiting()
-        ? theme.accent
-        : working()
-          ? theme.info
-          : isCurrent
-            ? theme.primary
-            : status()
-              ? theme.success
-              : theme.text;
-    return (
-      <box
-        paddingLeft={1}
-        paddingRight={1}
-        onMouseDown={(_e) => props.api.route.navigate("session", { sessionID: s.id })}
-      >
-        <box flexDirection="row">
-          <Show when={waiting()}>
-            <spinner frames={WAIT_FRAMES} interval={WAIT_MS} color={theme.accent} />
-          </Show>
-          <Show when={working()}>
-            <spinner frames={SPINNER_FRAMES} interval={SPINNER_MS} color={theme.info} />
-          </Show>
-          <Show when={!waiting() && !working()}>
-            <text fg={fg()} wrapMode="none">
-              {isCurrent ? "●" : " "}
-            </text>
-          </Show>
-          <text fg={fg()} wrapMode="none">
-            {sessionTitle(s)}
-          </text>
-        </box>
-        <text fg={theme.textMuted} wrapMode="none">
-          {" "}
-          {relTime(s.time.updated)} · {shortDir(s.directory)}
-        </text>
-      </box>
-    );
-  };
+  const renderRow = (s: SidebarSession) => (
+    <SessionRow
+      s={s}
+      isCurrent={s.id === props.session_id}
+      marker={props.marker}
+      waitingFrames={props.waiting}
+      spinnerFrames={props.spinner}
+      waiting={() => isWaiting(s.id)}
+      working={() => !isWaiting(s.id) && isBusy(statuses().get(s.id))}
+      status={() => statuses().get(s.id)}
+      theme={theme}
+      onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
+    />
+  );
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={1}>
-      <box paddingLeft={1} paddingTop={1}>
+      <box paddingTop={1}>
         <text fg={theme.text}>
           <b>Sessions</b>
         </text>
@@ -373,27 +461,18 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
       </Show>
       <Show when={!loading() && !error() && active().length > 0}>
         <box flexDirection="column">
-          <box paddingLeft={1} paddingTop={1}>
-            <text fg={theme.textMuted}>Active</text>
-          </box>
-          <For each={active()}>{(s) => renderRow(s)}</For>
+          {header("active", "Active")}
+          <Show when={!collapsed().has("active")}>
+            <For each={active()}>{(s) => renderRow(s)}</For>
+          </Show>
         </box>
       </Show>
-      <Show when={!loading() && !error() && recentGrouped().length > 0}>
+      <Show when={!loading() && !error() && recent().length > 0}>
         <box flexDirection="column">
-          <box paddingLeft={1} paddingTop={1}>
-            <text fg={theme.textMuted}>Recent</text>
-          </box>
-          <For each={recentGrouped()}>
-            {(g) => (
-              <box flexDirection="column">
-                <box paddingLeft={1} paddingTop={1}>
-                  <text fg={theme.textMuted}>{g.label}</text>
-                </box>
-                <For each={g.sessions}>{(s) => renderRow(s)}</For>
-              </box>
-            )}
-          </For>
+          {header("recent", "Recent")}
+          <Show when={!collapsed().has("recent")}>
+            <For each={recent()}>{(s) => renderRow(s)}</For>
+          </Show>
         </box>
       </Show>
     </box>
@@ -439,12 +518,27 @@ function openPicker(api: TuiPluginApi): void {
 
 const plugin: TuiPluginModule = {
   id: "opencode-session-surf",
-  tui: async (api) => {
+  tui: async (api, options) => {
+    setDebug(options?.debug === true);
+    debugLog(`module-loaded url=${import.meta.url}`);
+    const spinner = framesFor(SPINNERS, options?.spinner, SPINNERS.dots);
+    const waiting = framesFor(WAITERS, options?.waiting, WAITERS.flash);
+    const marker = markerGlyph(options?.marker);
+    const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     api.slots.register({
       order: 300,
       slots: {
         sidebar_content(_ctx, props) {
-          return <SidebarSessions api={api} session_id={props.session_id} />;
+          return (
+            <SidebarSessions
+              api={api}
+              session_id={props.session_id}
+              spinner={spinner}
+              waiting={waiting}
+              marker={marker}
+              pollMs={pollMs}
+            />
+          );
         },
       },
     });
