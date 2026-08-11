@@ -57,7 +57,7 @@ Test against a live opencode instance using a local checkout first:
 
 ```json
 {
-  "plugin": ["file:///Users/z/opencode-session-surf/index.tsx"]
+  "plugin": ["file:///path/to/opencode-session-surf/index.tsx"]
 }
 ```
 

@@ -1,4 +1,4 @@
-# opencode-session-surf
+# OpenCode session surf
 
 Session list sidebar plugin for [opencode](https://opencode.ai) TUI. Shows all
 sessions from the local opencode database, with live status (busy/waiting)
@@ -41,14 +41,20 @@ From a local checkout:
 ```json
 {
   "plugin": [
-    "file:///Users/z/opencode-session-surf/index.tsx"
+    "file:///path/to/opencode-session-surf/index.tsx"
   ]
 }
 ```
 
 Requires opencode with TUI plugin support and `bun`.
 
-## Keybinds
+## Configuration
+
+The plugin takes no options; everything is configured through `tui.json`
+keybinds, keyed by command name (custom keybinds are additive to the
+defaults):
+
+### Keybinds
 
 | Action | Default | Command |
 |---|---|---|
@@ -56,14 +62,26 @@ Requires opencode with TUI plugin support and `bun`.
 | Next session | `ctrl+x j` | `session_surf.next` |
 | Previous session | `ctrl+x k` | `session_surf.previous` |
 
-Keybinds are configurable in `tui.json` under `keybinds`, keyed by command
-name (custom keybinds are additive to the defaults):
-
 ```json
 {
   "keybinds": {
     "session_surf.next": "ctrl+]",
     "session_surf.previous": "ctrl+["
+  }
+}
+```
+
+Set a command to `"none"` to disable its keybind.
+
+### Rebind the leader key
+
+The leader is opencode's own setting, not this plugin's. Change it in
+`tui.json`:
+
+```json
+{
+  "keybinds": {
+    "leader": "ctrl+space"
   }
 }
 ```
@@ -81,13 +99,6 @@ checkout and restart opencode.
 
 The plugin reads session data from
 `~/.local/share/opencode/opencode.db` (via `bun:sqlite`).
-
-## Publish
-
-```bash
-npm run build
-npm publish
-```
 
 ## License
 
