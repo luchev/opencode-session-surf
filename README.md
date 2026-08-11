@@ -50,9 +50,38 @@ Requires opencode with TUI plugin support and `bun`.
 
 ## Configuration
 
-The plugin takes no options; everything is configured through `tui.json`
-keybinds, keyed by command name (custom keybinds are additive to the
-defaults):
+Plugin options are set through the `plugin` array in `tui.json` (tuple form):
+
+```json
+{
+  "plugin": [
+    ["opencode-session-surf", { "spinner": "dots" }]
+  ]
+}
+```
+
+### Options
+
+| Option | Values | Default | Description |
+|---|---|---|---|
+| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `""` | `dots` | Working spinner style; `""` hides it |
+| `waiting` | `flash`, `ellipsis`, `question`, `pulse`, `block`, `""` | `flash` | Waiting-for-input indicator; `""` hides it |
+| `marker` | `dot`, `square`, `arrow`, `star`, `none` | `dot` | Active-session marker glyph |
+| `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
+| `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
+
+Sessions with a non-busy status show a `•` marker; the active-session glyph
+stays visible even while its spinner is running. The sidebar is split into two
+sections, each collapsible on click via the `▼`/`▶` toggle:
+
+- **Active** — the session you're in, plus anything busy, waiting, or updated
+  in the last 15 minutes
+- **Recent** — the last 24 hours of work, plus the previous block of work
+  before it (so a quiet gap, like a weekend, doesn't hide the last real batch
+  of sessions)
+
+Keybinds are configured through `tui.json`'s `keybinds` map, keyed by command
+name (custom keybinds are additive to the defaults):
 
 ### Keybinds
 
@@ -92,6 +121,7 @@ The leader is opencode's own setting, not this plugin's. Change it in
 bun install
 bun run dev     # build watch → dist/index.js
 bun run build   # one-shot build
+bun test        # unit + render tests
 ```
 
 To test the plugin locally, point tui.json's `plugin` array at the local
