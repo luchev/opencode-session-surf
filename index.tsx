@@ -410,6 +410,43 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   );
 }
 
+function currentSessionID(api: TuiPluginApi): string | undefined {
+  const route = api.route.current;
+  if (route.name !== "session") return undefined;
+  const sessionID = (route.params as { sessionID?: unknown } | undefined)?.sessionID;
+  return typeof sessionID === "string" ? sessionID : undefined;
+}
+
+function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
+  const list = dbSessions();
+  if (list.length === 0) return;
+  const currentID = currentSessionID(api);
+  const idx = list.findIndex((s) => s.id === currentID);
+  const next = list[((idx === -1 ? 0 : idx) + delta + list.length) % list.length];
+  if (next) api.route.navigate("session", { sessionID: next.id });
+}
+
+// DialogSelect already does substring/fuzzy filtering over option titles, so
+// no custom fuzzy-match algorithm is needed here.
+function openPicker(api: TuiPluginApi): void {
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title="Switch Session"
+      placeholder="Search sessions..."
+      current={currentSessionID(api)}
+      options={dbSessions().map((s) => ({
+        title: sessionTitle(s),
+        value: s.id,
+        description: `${relTime(s.time.updated)} · ${shortDir(s.directory)}`,
+      }))}
+      onSelect={(opt) => {
+        api.ui.dialog.clear();
+        api.route.navigate("session", { sessionID: opt.value });
+      }}
+    />
+  ));
+}
+
 const plugin: TuiPluginModule = {
   id: "opencode-session-surf",
   tui: async (api) => {
@@ -420,6 +457,49 @@ const plugin: TuiPluginModule = {
           return <SidebarSessions api={api} session_id={props.session_id} />;
         },
       },
+    });
+
+    // Keybinds are configurable via tui.json's "keybinds" map, keyed by
+    // command name (e.g. {"session_surf.next": "ctrl+]"}); ctrl+o is the
+    // hardcoded default for opening the picker per explicit user request.
+    api.keymap.registerLayer({
+      commands: [
+        {
+          name: "session_surf.picker.open",
+          title: "Switch session",
+          category: "Session",
+          namespace: "palette",
+          run() {
+            openPicker(api);
+          },
+        },
+        {
+          name: "session_surf.next",
+          title: "Next session",
+          category: "Session",
+          namespace: "palette",
+          run() {
+            navigateRelative(api, 1);
+          },
+        },
+        {
+          name: "session_surf.previous",
+          title: "Previous session",
+          category: "Session",
+          namespace: "palette",
+          run() {
+            navigateRelative(api, -1);
+          },
+        },
+      ],
+      bindings: [
+        { key: "ctrl+o", cmd: "session_surf.picker.open", desc: "Open session picker" },
+        ...api.tuiConfig.keybinds.gather("session_surf", [
+          "session_surf.picker.open",
+          "session_surf.next",
+          "session_surf.previous",
+        ]),
+      ],
     });
   },
 };
