@@ -73,6 +73,27 @@ export const PRESETS: Record<string, Preset> = {
   ping: { marker: "◉", waiting: WAITERS.bell, spinner: SPINNERS.arc, combined: true },
   term: { marker: ">", waiting: ["...", "   "], spinner: ["-", "\\", "|", "/"], combined: true },
   braille: { marker: "●", waiting: WAITERS.pulse, spinner: SPINNERS.dots, combined: false },
+  hex: {
+    marker: "󰋘",
+    waiting: ["󰋘", "󰋙"],
+    spinner: ["󰫃", "󰫄", "󰫅", "󰫆", "󰫇", "󰫈", "󰫇", "󰫆", "󰫅", "󰫄"],
+    combined: true,
+  },
+  moon: {
+    marker: "",
+    waiting: ["", ""],
+    spinner: [
+      "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+      "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+    ],
+    combined: true,
+  },
+  pie: {
+    marker: "󰪥",
+    waiting: ["󰪞", "󰪥"],
+    spinner: ["󰪞", "󰪟", "󰪠", "󰪡", "󰪢", "󰪣", "󰪤", "󰪥", "󰪤", "󰪣", "󰪢", "󰪡", "󰪠", "󰪟"],
+    combined: true,
+  },
 };
 const WAIT_MS = 450;
 // Anything updated in the last 15 minutes is Active.
@@ -281,6 +302,18 @@ export function fuzzyRank(query: string, sessions: SidebarSession[]): SidebarSes
   return scored
     .sort((a, b) => b.score - a.score || b.s.time.updated - a.s.time.updated)
     .map((x) => x.s);
+}
+
+// Title for a forked session. The first fork keeps the session's name; the
+// second fork and later get a numbered suffix ("name (fork 2)", "name (fork 3)")
+// so the picker can tell them apart. The number counts every session in the
+// family (the original plus any earlier forks, suffixed or not).
+export function forkTitle(base: string, sessions: SidebarSession[]): string {
+  const family = sessions.filter(
+    (s) => sessionTitle(s) === base || sessionTitle(s).startsWith(`${base} (fork `),
+  );
+  const ordinal = family.length;
+  return ordinal === 1 ? base : `${base} (fork ${ordinal})`;
 }
 
 // Recent = the last BLOCK_MS of work plus the block of work right before it
@@ -618,33 +651,233 @@ function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
   if (next) api.route.navigate("session", { sessionID: next.id });
 }
 
-// The host's DialogSelect only substring-matches option titles. We render it
-// with skipFilter so it shows exactly the options we hand it, and re-rank
-// them with our own fuzzy matcher (score desc, most recent on top) whenever
-// the query changes via onFilter.
+// The host's DialogSelect only substring-matches option titles, so the picker
+// is a custom dialog instead: a fuzzy-filtered session list with a search
+// input, plus a temporary keymap layer whose bindings (configurable through
+// tui.json's "keybinds" map, defaulting to ctrl+r/d/f, enter, esc, arrows) run
+// the session actions shown in the hint bar at the bottom. Bare keystrokes
+// fall through the layer to the search input, so typing filters the list at
+// all times.
 function openPicker(api: TuiPluginApi): void {
+  const theme = api.theme.current;
   const [query, setQuery] = createSignal("");
-  const options = createMemo(() =>
-    fuzzyRank(query(), dbSessions()).map((s) => ({
-      title: sessionTitle(s),
-      value: s.id,
-      description: `${relTime(s.time.updated)} · ${shortDir(s.directory)}`,
-    })),
-  );
-  api.ui.dialog.replace(() => (
-    <api.ui.DialogSelect
-      title="Switch Session"
-      placeholder="Search sessions..."
-      current={currentSessionID(api)}
-      options={options()}
-      skipFilter
-      onFilter={(q) => setQuery(q)}
-      onSelect={(opt) => {
-        api.ui.dialog.clear();
-        api.route.navigate("session", { sessionID: opt.value });
-      }}
-    />
-  ));
+  const [sessions, setSessions] = createSignal<SidebarSession[]>(dbSessions());
+  const [index, setIndex] = createSignal(0);
+  const filtered = createMemo(() => fuzzyRank(query(), sessions()));
+  const selected = () => filtered()[Math.min(index(), filtered().length - 1)];
+  let unregisterLayer: (() => void) | undefined;
+  const unregister = () => {
+    unregisterLayer?.();
+    unregisterLayer = undefined;
+  };
+  let closing = false;
+  const close = () => {
+    if (closing) return;
+    closing = true;
+    unregister();
+    api.ui.dialog.clear();
+  };
+  const switchTo = (s: SidebarSession) => {
+    close();
+    api.route.navigate("session", { sessionID: s.id });
+  };
+  // Re-open the picker (used after rename/delete so the window stays open and
+  // the list reflects the change). Guards against double-registering the layer.
+  const show = () => {
+    unregister();
+    const layer = {
+      commands: [
+        { name: "session_surf.picker.switch", title: "Switch session", run: () => { const s = selected(); if (s) switchTo(s); } },
+        { name: "session_surf.picker.rename", title: "Rename session", run: doRename },
+        { name: "session_surf.picker.delete", title: "Delete session", run: doDelete },
+        { name: "session_surf.picker.fork", title: "Fork session", run: doFork },
+        { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => Math.max(0, i - 1)) },
+        { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => Math.min(filtered().length - 1, i + 1)) },
+        { name: "session_surf.picker.close", title: "Close picker", run: close },
+      ],
+      bindings: [
+        { key: "enter", cmd: "session_surf.picker.switch", desc: "Switch" },
+        { key: "ctrl+r", cmd: "session_surf.picker.rename", desc: "Rename" },
+        { key: "ctrl+d", cmd: "session_surf.picker.delete", desc: "Delete" },
+        { key: "ctrl+f", cmd: "session_surf.picker.fork", desc: "Fork" },
+        { key: "up", cmd: "session_surf.picker.up", desc: "Up" },
+        { key: "down", cmd: "session_surf.picker.down", desc: "Down" },
+        { key: "esc", cmd: "session_surf.picker.close", desc: "Close" },
+        ...api.tuiConfig.keybinds.gather("session_surf", [
+          "session_surf.picker.switch",
+          "session_surf.picker.rename",
+          "session_surf.picker.delete",
+          "session_surf.picker.fork",
+          "session_surf.picker.up",
+          "session_surf.picker.down",
+          "session_surf.picker.close",
+        ]),
+      ],
+    };
+    unregisterLayer = api.keymap.registerLayer(layer);
+    const bindings = api.tuiConfig.keybinds.gather("session_surf", [
+      "session_surf.picker.switch",
+      "session_surf.picker.rename",
+      "session_surf.picker.delete",
+      "session_surf.picker.fork",
+      "session_surf.picker.close",
+    ]);
+    const hintKey = (cmd: string) => {
+      const b = bindings.find((x) => x.cmd === cmd);
+      return b && typeof b.key === "string" ? b.key : cmd;
+    };
+    const hint = (cmd: string, label: string) => (
+      <box flexDirection="row">
+        <text fg={theme.accent}><b>{hintKey(cmd)}</b></text>
+        <text fg={theme.textMuted}>{` ${label}`}{"   "}</text>
+      </box>
+    );
+    // Status per session (local state first, then other instances' broadcasts)
+    // so each row is colored by what that session is doing: idle green, busy
+    // purple, error orange, unknown white.
+    const statuses = new Map<string, SessionStatus>();
+    for (const s of sessions()) {
+      const local = api.state.session.status(s.id);
+      if (local) statuses.set(s.id, local);
+    }
+    for (const r of readCrossInstance()) {
+      for (const [id, st] of Object.entries(r.statuses)) {
+        if (!statuses.has(id)) statuses.set(id, st);
+      }
+    }
+    // Wide panel (like the host's move-session dialog); the list is capped to
+    // the terminal height so the panel never touches the screen edges.
+    api.ui.dialog.setSize("xlarge");
+    const budget = 114;
+    const maxListHeight = Math.max(3, (api.renderer.height > 20 ? api.renderer.height : 30) - 12);
+    const listHeight = createMemo(() => Math.min(filtered().length, maxListHeight));
+    const trimText = (t: string, max: number) => (t.length <= max ? t : t.slice(0, Math.max(0, max - 1)) + "…");
+    // The host wraps stack content in its own centered dialog overlay; adding
+    // a nested <api.ui.Dialog> would render a second overlay that anchors to
+    // the first panel's corner in the real host (bottom-right in 1.18.15).
+    api.ui.dialog.replace(() => (
+      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
+        <text fg={theme.text}><b>Switch Session</b></text>
+        <input
+          value={query()}
+          onInput={setQuery}
+          placeholder="Search sessions..."
+          focused
+        />
+        <Show when={filtered().length > 0} fallback={<text fg={theme.textMuted}>No sessions match</text>}>
+          <scrollbox height={listHeight()} scrollY>
+            <For each={filtered()}>
+              {(s, i) => {
+                const st = statuses.get(s.id);
+                const col =
+                  st === undefined
+                    ? theme.text
+                    : isBusy(st)
+                      ? theme.info
+                      : st.type === "idle"
+                        ? theme.success
+                        : theme.error;
+                const age = relTime(s.time.updated);
+                const dirMax = Math.max(4, budget - age.length - 2);
+                return (
+                  <box flexDirection="column" onMouseDown={() => switchTo(s)}>
+                    <text fg={i() === index() ? theme.accent : col}>{trimText(sessionTitle(s), budget)}</text>
+                    <box flexDirection="row" justifyContent="space-between">
+                      <text fg={theme.textMuted}>{age}</text>
+                      <text fg={theme.textMuted}>{trimText(shortDir(s.directory), dirMax)}</text>
+                    </box>
+                  </box>
+                );
+              }}
+            </For>
+          </scrollbox>
+        </Show>
+        <box flexDirection="row" paddingTop={1}>
+          {hint("session_surf.picker.switch", "switch")}
+          {hint("session_surf.picker.rename", "rename")}
+          {hint("session_surf.picker.delete", "delete")}
+          {hint("session_surf.picker.fork", "fork")}
+          {hint("session_surf.picker.close", "close")}
+        </box>
+      </box>
+    ), close);
+  };
+
+  function doRename(): void {
+    const s = selected();
+    if (!s) return;
+    unregister();
+    api.ui.dialog.replace(() => (
+      <api.ui.DialogPrompt
+        title="Rename session"
+        value={sessionTitle(s)}
+        placeholder="New title"
+        onConfirm={(v) => {
+          const t = v.trim();
+          if (t) {
+            void api.client.session.update({ sessionID: s.id, title: t });
+            setSessions(dbSessions());
+          }
+          show();
+        }}
+        onCancel={() => show()}
+      />
+    ));
+  }
+
+  function doDelete(): void {
+    const s = selected();
+    if (!s) return;
+    unregister();
+    api.ui.dialog.replace(() => (
+      <api.ui.DialogConfirm
+        title="Delete session"
+        message={`Delete "${sessionTitle(s)}"? This removes the session and all of its messages.`}
+        onConfirm={() => {
+          void (async () => {
+            await api.client.session.delete({ sessionID: s.id });
+            const remaining = dbSessions();
+            setSessions(remaining);
+            if (currentSessionID(api) === s.id && remaining.length > 0) {
+              api.route.navigate("session", { sessionID: remaining[0].id });
+            }
+          })();
+          show();
+        }}
+        onCancel={() => show()}
+      />
+    ));
+  }
+
+  function doFork(): void {
+    const s = selected();
+    if (!s) return;
+    close();
+    void (async () => {
+      try {
+        const msgs = await api.client.session.messages({ sessionID: s.id, limit: 1 });
+        const last = msgs.data?.[0];
+        if (!last) {
+          api.ui.toast({ variant: "warning", message: "This session has no messages to fork" });
+          return;
+        }
+        const forked = await api.client.session.fork({ sessionID: s.id, messageID: last.info.id });
+        if (!forked.data) {
+          api.ui.toast({ variant: "error", message: "Fork failed" });
+          return;
+        }
+        await api.client.session.update({
+          sessionID: forked.data.id,
+          title: forkTitle(sessionTitle(s), dbSessions()),
+        });
+        api.route.navigate("session", { sessionID: forked.data.id });
+      } catch {
+        api.ui.toast({ variant: "error", message: "Fork failed" });
+      }
+    })();
+  }
+
+  show();
 }
 
 const plugin: TuiPluginModule = {

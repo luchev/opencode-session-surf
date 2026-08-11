@@ -15,6 +15,7 @@ import {
   relTime,
   sessionTitle,
   shortDir,
+  forkTitle,
 } from "../index.tsx";
 
 describe("framesFor", () => {
@@ -85,6 +86,31 @@ describe("PRESETS", () => {
     expect(p.waiting).toBe(WAITERS.pulse);
     expect(p.spinner).toBe(SPINNERS.dots);
     expect(p.combined).toBe(false);
+  });
+  test("hex uses hexagon marker, hexagon/outline waiting, slice spinner, combined", () => {
+    const p = PRESETS.hex;
+    expect(p.marker).toBe("󰋘");
+    expect(p.waiting).toEqual(["󰋘", "󰋙"]);
+    expect(p.spinner).toEqual(["󰫃", "󰫄", "󰫅", "󰫆", "󰫇", "󰫈", "󰫇", "󰫆", "󰫅", "󰫄"]);
+    expect(p.combined).toBe(true);
+  });
+  test("moon uses new-moon marker, full/new waiting, 28-phase cycle, combined", () => {
+    const p = PRESETS.moon;
+    expect(p.marker).toBe("");
+    expect(p.waiting).toEqual(["", ""]);
+    expect(p.spinner).toHaveLength(28);
+    expect(p.spinner[0]).toBe("");
+    expect(p.spinner[14]).toBe("");
+    expect(p.combined).toBe(true);
+  });
+  test("pie uses full-slice marker, slice1/full waiting, fill/drain cycle, combined", () => {
+    const p = PRESETS.pie;
+    expect(p.marker).toBe("󰪥");
+    expect(p.waiting).toEqual(["󰪞", "󰪥"]);
+    expect(p.spinner[0]).toBe("󰪞");
+    expect(p.spinner[7]).toBe("󰪥");
+    expect(p.spinner).toHaveLength(14);
+    expect(p.combined).toBe(true);
   });
 });
 
@@ -246,5 +272,36 @@ describe("fuzzyRank", () => {
       },
     ];
     expect(fuzzyRank("session-surf", s)).toHaveLength(1);
+  });
+});
+
+describe("forkTitle", () => {
+  const t = (id: string, title: string) => ({
+    id,
+    projectID: "p",
+    directory: "/x",
+    title,
+    time: { created: 0, updated: 1 },
+  });
+  test("first fork keeps the original name", () => {
+    const s = [t("orig", "surfer")];
+    expect(forkTitle("surfer", s)).toBe("surfer");
+  });
+  test("second fork gets the (fork 2) suffix", () => {
+    const s = [t("orig", "surfer"), t("f1", "surfer")];
+    expect(forkTitle("surfer", s)).toBe("surfer (fork 2)");
+  });
+  test("third fork counts suffixed forks", () => {
+    const s = [t("orig", "surfer"), t("f1", "surfer"), t("f2", "surfer (fork 2)")];
+    expect(forkTitle("surfer", s)).toBe("surfer (fork 3)");
+  });
+  test("the ordinal counts every fork in the family", () => {
+    // an early fork was deleted; the count is family size, not max number
+    const s = [t("orig", "surfer"), t("f2", "surfer (fork 2)")];
+    expect(forkTitle("surfer", s)).toBe("surfer (fork 2)");
+  });
+  test("ignores unrelated sessions with a similar prefix", () => {
+    const s = [t("orig", "surfer"), t("other", "surfboard")];
+    expect(forkTitle("surfer", s)).toBe("surfer");
   });
 });
