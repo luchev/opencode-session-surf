@@ -1,6 +1,6 @@
 {
   "name": "opencode-session-surf",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Session list sidebar plugin for opencode TUI with cross-instance status sync and fuzzy session switching",
   "license": "MIT",
   "repository": {
@@ -22,7 +22,13 @@
     "dev": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid --watch",
     "prepublishOnly": "bun run build"
   },
-  "keywords": ["opencode", "opencode-plugin", "tui", "sessions", "sidebar"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "sessions",
+    "sidebar"
+  ],
   "dependencies": {
     "@opencode-ai/plugin": "1.18.15",
     "@opencode-ai/sdk": "1.18.15",
