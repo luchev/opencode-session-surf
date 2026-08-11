@@ -11,7 +11,8 @@ synced across opencode instances, plus quick session switching.
 - **Cross-instance status sync** — each opencode process broadcasts session
   statuses (busy/waiting) to a temp-dir status file; other instances pick them
   up so you can see when a session is active elsewhere
-- **Ctrl+O fuzzy picker** — fuzzy-search sessions by title and switch instantly
+- **Ctrl+O fuzzy picker** — fuzzy-search sessions by title or directory and
+  switch instantly; close matches are ordered by recency, most recent on top
 - **Next/previous session** commands for quick navigation
 
 ## Install
@@ -63,17 +64,36 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 ### Options
 
 | Option | Values | Default | Description |
-|---|---|---|---|
-| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `""` | `dots` | Working spinner style; `""` hides it |
-| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `dots`, `eyeblink`, `bell`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
-| `marker` | `dot`, `square`, `arrow`, `star`, `none`, `caret`, `ping` | `dot` | Active-session marker glyph |
+|---|---|---|---|---|
+| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `gauge`, `speed`, `""` | `dots` | Working spinner style; `""` hides it |
+| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `bounce`, `eyeblink`, `bell`, `help`, `bulb`, `ghost`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
+| `marker` | `dot`, `square`, `arrow`, `star`, `none`, `caret`, `ping`, `creation`, `sprout` | `dot` | Active-session marker glyph |
+| `preset` | `ping`, `term`, `braille` | — | Predefined look that overrides `spinner`/`waiting`/`marker` (see below) |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
 | `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
+Some symbols (`battery`, `gauge`, `speed`, `eyeblink`, `bell`, `help`, `bulb`,
+`ghost`, `creation`, `sprout`, and the `ping` preset's waiting indicator) are
+Nerd Font glyphs and require a [patched Nerd Font](https://www.nerdfonts.com/)
+installed in your terminal — without one they render as boxes or nothing.
+
 With `openElsewhere` enabled, sessions running in another opencode instance show a `•` marker;
 the active-session glyph stays visible even while its spinner is running. The sidebar is split into two
 sections, each collapsible on click via the `▼`/`▶` toggle:
+
+- **`preset: "ping"`** — a predefined look that ignores the individual
+  `spinner`/`waiting`/`marker` options: the current session shows `◉` (ping),
+  waiting uses the `bell` style, working uses the `arc` spinner, and idle
+  Active sessions show a `•` dot. The marker and spinner share one cell, so
+  the current glyph replaces the spinner instead of sitting next to it, and
+  no column is reserved for each separately.
+
+- **`preset: "term"`** — pure ASCII, works in any terminal: `>` for the
+  current session, `...` while waiting, `-\|/` while working. Also combined.
+
+- **`preset: "braille"`** — `●` marker, `⣾⣿` pulse while waiting, braille
+  dots while working. Keeps the marker and spinner in separate cells.
 
 - **Active** — the session you're in, plus anything busy, waiting, or updated
   in the last 15 minutes. Idle rows in Active are green; no Active session
