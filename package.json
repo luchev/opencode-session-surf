@@ -11,7 +11,7 @@
   "exports": {
     "./tui": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./index.tsx"
     }
   },
   "files": [
@@ -20,7 +20,8 @@
   "scripts": {
     "build": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid && cp index.d.ts dist/",
     "dev": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid --watch",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "test": "bun test --preload @opentui/solid/preload"
   },
   "keywords": [
     "opencode",
