@@ -1,6 +1,6 @@
 /// <reference path="./bun-sqlite.d.ts" />
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal, onCleanup, For, Show } from "solid-js";
+import { createMemo, createSignal, onCleanup, For, Show } from "solid-js";
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { Database } from "bun:sqlite";
@@ -12,6 +12,9 @@ const POLL_MS = 10_000;
 const RECENT_MS = 24 * 60 * 60 * 1000;
 const SPINNER_FRAMES = ["▁", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"];
 const SPINNER_MS = 150;
+// Waiting-for-input flash: two frames at 450ms = the old tick()/3 flash cadence.
+const WAIT_FRAMES = ["❓", "  "];
+const WAIT_MS = 450;
 const ACTIVE_MS = 2 * 60 * 1000;
 const DB_PATH = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
 
@@ -200,7 +203,6 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   const [error, setError] = createSignal<string | null>(null);
   const [statuses, setStatuses] = createSignal<Map<string, SessionStatus>>(new Map());
   const [waitingIds, setWaitingIds] = createSignal<Set<string>>(new Set());
-  const [tick, setTick] = createSignal(0);
 
   async function refresh() {
     try {
@@ -276,21 +278,6 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
 
   const isWaiting = (id: string) => waitingIds().has(id);
 
-  const anyAnimated = createMemo(() =>
-    sessions().some((s) => {
-      const st = statuses().get(s.id);
-      return isBusy(st) || isWaiting(s.id);
-    }),
-  );
-  createEffect(() => {
-    if (!anyAnimated()) return;
-    const spin = setInterval(() => {
-      setTick((t) => t + 1);
-      props.api.renderer.requestRender();
-    }, SPINNER_MS);
-    onCleanup(() => clearInterval(spin));
-  });
-
   onCleanup(() => {
     unsub();
     unsubStatus();
@@ -316,9 +303,9 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   const renderRow = (s: SidebarSession) => {
     const isCurrent = s.id === props.session_id;
     // fg/marker MUST stay as getters (not pre-computed values) so the JSX
-    // compiler keeps them reactive to tick()/statuses() - <For> only
-    // recreates a row when the session object identity changes, so a plain
-    // computed value here would freeze at whatever it was on first mount.
+    // compiler keeps them reactive to statuses() - <For> only recreates a row
+    // when the session object identity changes, so a plain computed value here
+    // would freeze at whatever it was on first mount.
     const waiting = () => isWaiting(s.id);
     const working = () => !waiting() && isBusy(statuses().get(s.id));
     const status = () => statuses().get(s.id);
@@ -332,25 +319,28 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
             : status()
               ? theme.success
               : theme.text;
-    const marker = () =>
-      waiting()
-        ? Math.floor(tick() / 3) % 2 === 0
-          ? "❓"
-          : "  "
-        : working()
-          ? SPINNER_FRAMES[tick() % SPINNER_FRAMES.length]
-          : isCurrent
-            ? "●"
-            : " ";
     return (
       <box
         paddingLeft={1}
         paddingRight={1}
         onMouseDown={(_e) => props.api.route.navigate("session", { sessionID: s.id })}
       >
-        <text fg={fg()} wrapMode="none">
-          {marker()} {sessionTitle(s)}
-        </text>
+        <box flexDirection="row">
+          <Show when={waiting()}>
+            <spinner frames={WAIT_FRAMES} interval={WAIT_MS} color={theme.accent} />
+          </Show>
+          <Show when={working()}>
+            <spinner frames={SPINNER_FRAMES} interval={SPINNER_MS} color={theme.info} />
+          </Show>
+          <Show when={!waiting() && !working()}>
+            <text fg={fg()} wrapMode="none">
+              {isCurrent ? "●" : " "}
+            </text>
+          </Show>
+          <text fg={fg()} wrapMode="none">
+            {sessionTitle(s)}
+          </text>
+        </box>
         <text fg={theme.textMuted} wrapMode="none">
           {" "}
           {relTime(s.time.updated)} · {shortDir(s.directory)}
