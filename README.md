@@ -16,12 +16,32 @@ synced across opencode instances, plus quick session switching.
 
 ## Install
 
-Add to your `~/.config/opencode/tui.json` `plugin` array:
+From npm (published version):
+
+```json
+{
+  "plugin": [
+    "opencode-session-surf"
+  ]
+}
+```
+
+From the GitHub repo:
 
 ```json
 {
   "plugin": [
     "https://github.com/luchev/opencode-session-surf"
+  ]
+}
+```
+
+From a local checkout:
+
+```json
+{
+  "plugin": [
+    "file:///Users/z/opencode-session-surf/index.tsx"
   ]
 }
 ```
@@ -52,11 +72,22 @@ name (custom keybinds are additive to the defaults):
 
 ```bash
 bun install
-bun run dev
+bun run dev     # build watch → dist/index.js
+bun run build   # one-shot build
 ```
+
+To test the plugin locally, point tui.json's `plugin` array at the local
+checkout and restart opencode.
 
 The plugin reads session data from
 `~/.local/share/opencode/opencode.db` (via `bun:sqlite`).
+
+## Publish
+
+```bash
+npm run build
+npm publish
+```
 
 ## License
 
