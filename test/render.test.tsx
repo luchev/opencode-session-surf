@@ -36,7 +36,7 @@ describe("SessionRow", () => {
         s={session}
         isCurrent={false}
         marker="●"
-        waitingFrames={WAITERS.flash}
+        waitingFrames={WAITERS.emoji}
         spinnerFrames={SPINNERS.arc}
         waiting={() => false}
         working={() => true}
@@ -46,6 +46,7 @@ describe("SessionRow", () => {
       />
     ));
     expect(frame).toContain(SPINNERS.arc[0]);
+    expect(frame).toContain(`${SPINNERS.arc[0]} surfer`); // spinner keeps its cell: space after it
     expect(frame).toContain("surfer");
   });
 
@@ -84,6 +85,7 @@ describe("SessionRow", () => {
       />
     ));
     expect(frame).toContain(WAITERS.ellipsis[0]);
+    expect(frame).toContain(`${WAITERS.ellipsis[0]} surfer`); // spinner keeps its cell: space after it
   });
 
   test("idle row shows no marker or spinner, title only", async () => {
@@ -122,5 +124,37 @@ describe("SessionRow", () => {
       />
     ));
     expect(frame).toContain("•");
+  });
+
+  test("title column is stable whether or not a spinner shows", async () => {
+    const busy = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={false}
+        marker="●"
+        waitingFrames={[]}
+        spinnerFrames={SPINNERS.arc}
+        waiting={() => false}
+        working={() => true}
+        status={() => status("busy")}
+        theme={theme}
+        onNavigate={() => {}}
+      />
+    ));
+    const idle = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={false}
+        marker="●"
+        waitingFrames={[]}
+        spinnerFrames={[]}
+        waiting={() => false}
+        working={() => false}
+        status={() => undefined}
+        theme={theme}
+        onNavigate={() => {}}
+      />
+    ));
+    expect(busy.indexOf("surfer")).toBe(idle.indexOf("surfer"));
   });
 });

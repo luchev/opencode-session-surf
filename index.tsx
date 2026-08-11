@@ -14,8 +14,8 @@ const POLL_MS = 3_000;
 // doesn't hide the previous batch of sessions.
 const BLOCK_MS = 24 * 60 * 60 * 1000;
 const SPINNER_MS = 150;
-// Named styles, selectable via plugin options ({"spinner": "dots", "waiting": "flash", "marker": "dot"}).
-type SpinnerName = "dots" | "arc" | "sweep" | "fill" | "bounce" | "sparkle";
+// Named styles, selectable via plugin options ({"spinner": "dots", "waiting": "emoji", "marker": "dot"}).
+type SpinnerName = "dots" | "arc" | "sweep" | "fill" | "bounce" | "sparkle" | "block";
 export const SPINNERS: Record<SpinnerName, string[]> = {
   dots: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
   arc: ["◜", "◝", "◞", "◟"],
@@ -23,10 +23,11 @@ export const SPINNERS: Record<SpinnerName, string[]> = {
   fill: ["░", "▒", "▓", "█"],
   bounce: ["⠁", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"],
   sparkle: ["✶", "✸", "✹", "✺", "✹", "✸"],
+  block: ["▁", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"],
 };
-type WaitingName = "flash" | "ellipsis" | "question" | "pulse" | "block";
+type WaitingName = "emoji" | "ellipsis" | "question" | "pulse" | "block";
 export const WAITERS: Record<WaitingName, string[]> = {
-  flash: ["❓", "  "],
+  emoji: ["❓", "  "],
   ellipsis: ["…", "  "],
   question: ["?", " "],
   pulse: ["⣾", "⣿"],
@@ -257,26 +258,28 @@ export function SessionRow(props: {
           : props.status()
             ? props.theme.success
             : props.theme.text;
+  // Marker never renders empty: the cell stays reserved so titles keep a
+  // fixed column whether or not a spinner is showing.
   const marker = () =>
     props.isCurrent
       ? props.marker
       : props.status() && !isBusy(props.status())
         ? "•"
-        : props.waiting() || props.working()
-          ? ""
-          : " ";
+        : " ";
   return (
     <box paddingLeft={1} paddingRight={1} onMouseDown={(_e) => props.onNavigate()}>
       <box flexDirection="row">
         <text fg={props.isCurrent ? props.theme.primary : fg()} wrapMode="none">
           {marker()}
         </text>
-        <Show when={props.waiting() && props.waitingFrames.length > 0}>
-          <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
-        </Show>
-        <Show when={props.working() && props.spinnerFrames.length > 0}>
-          <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
-        </Show>
+        <box width={1}>
+          <Show when={props.waiting() && props.waitingFrames.length > 0}>
+            <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
+          </Show>
+          <Show when={props.working() && props.spinnerFrames.length > 0}>
+            <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
+          </Show>
+        </box>
         <text fg={fg()} wrapMode="none">
           {" "}
           {sessionTitle(props.s)}
@@ -522,7 +525,7 @@ const plugin: TuiPluginModule = {
     setDebug(options?.debug === true);
     debugLog(`module-loaded url=${import.meta.url}`);
     const spinner = framesFor(SPINNERS, options?.spinner, SPINNERS.dots);
-    const waiting = framesFor(WAITERS, options?.waiting, WAITERS.flash);
+    const waiting = framesFor(WAITERS, options?.waiting, WAITERS.pulse);
     const marker = markerGlyph(options?.marker);
     const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     api.slots.register({
