@@ -460,8 +460,8 @@ const plugin: TuiPluginModule = {
     });
 
     // Keybinds are configurable via tui.json's "keybinds" map, keyed by
-    // command name (e.g. {"session_surf.next": "ctrl+]"}); ctrl+o is the
-    // hardcoded default for opening the picker per explicit user request.
+    // command name (e.g. {"session_surf.next": "ctrl+]"}); ctrl+o and
+    // ctrl+x j/k are the hardcoded defaults (vim-style), overridable per user.
     api.keymap.registerLayer({
       commands: [
         {
@@ -494,6 +494,8 @@ const plugin: TuiPluginModule = {
       ],
       bindings: [
         { key: "ctrl+o", cmd: "session_surf.picker.open", desc: "Open session picker" },
+        { key: "ctrl+xj", cmd: "session_surf.next", desc: "Next session" },
+        { key: "ctrl+xk", cmd: "session_surf.previous", desc: "Previous session" },
         ...api.tuiConfig.keybinds.gather("session_surf", [
           "session_surf.picker.open",
           "session_surf.next",

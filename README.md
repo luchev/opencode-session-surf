@@ -33,11 +33,11 @@ Requires opencode with TUI plugin support and `bun`.
 | Action | Default | Command |
 |---|---|---|
 | Open session picker | `ctrl+o` | `session_surf.picker.open` |
-| Next session | — | `session_surf.next` |
-| Previous session | — | `session_surf.previous` |
+| Next session | `ctrl+x j` | `session_surf.next` |
+| Previous session | `ctrl+x k` | `session_surf.previous` |
 
 Keybinds are configurable in `tui.json` under `keybinds`, keyed by command
-name:
+name (custom keybinds are additive to the defaults):
 
 ```json
 {
