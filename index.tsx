@@ -4,13 +4,71 @@ import { createEffect, createMemo, createSignal, onCleanup, For, Show } from "so
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { Database } from "bun:sqlite";
+import { mkdirSync, readdirSync, readFileSync, watch as fsWatch, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const POLL_MS = 10_000;
 const RECENT_MS = 24 * 60 * 60 * 1000;
-const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"];
+const SPINNER_FRAMES = ["▁", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"];
 const SPINNER_MS = 150;
 const ACTIVE_MS = 2 * 60 * 1000;
 const DB_PATH = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
+
+// Cross-instance busy-status broadcast: each opencode process writes its own
+// locally-known session statuses to a pid-named file in the OS temp dir, so
+// other instances can see when a session is busy elsewhere. Temp dir means
+// no manual cleanup is needed; stale entries are ignored by age.
+const STATUS_DIR = join(tmpdir(), "opencode-session-surf-status");
+const STALE_MS = POLL_MS * 3;
+
+function ensureStatusDir(): void {
+  try {
+    mkdirSync(STATUS_DIR, { recursive: true });
+  } catch {}
+}
+
+function writeOwnStatuses(map: Map<string, SessionStatus>): void {
+  try {
+    ensureStatusDir();
+    const file = join(STATUS_DIR, `${process.pid}.json`);
+    writeFileSync(file, JSON.stringify({ updated: Date.now(), statuses: Object.fromEntries(map) }));
+  } catch {}
+}
+
+function readCrossInstanceStatuses(): Map<string, SessionStatus>[] {
+  try {
+    ensureStatusDir();
+    const ownFile = `${process.pid}.json`;
+    const files = readdirSync(STATUS_DIR).filter((f: string) => f.endsWith(".json") && f !== ownFile);
+    const out: Map<string, SessionStatus>[] = [];
+    for (const f of files) {
+      try {
+        const raw = JSON.parse(readFileSync(join(STATUS_DIR, f), "utf8")) as {
+          updated?: number;
+          statuses?: Record<string, SessionStatus>;
+        };
+        if (!raw.updated || Date.now() - raw.updated > STALE_MS) continue;
+        out.push(new Map(Object.entries(raw.statuses ?? {})));
+      } catch {}
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// Union of busy signals: a session shows busy if ANY live instance reports it
+// busy, without letting other instances' idle knowledge override local truth.
+function mergeBusy(local: Map<string, SessionStatus>, remotes: Map<string, SessionStatus>[]): Map<string, SessionStatus> {
+  const merged = new Map(local);
+  for (const remote of remotes) {
+    for (const [id, status] of remote) {
+      if (isBusy(status)) merged.set(id, status);
+    }
+  }
+  return merged;
+}
 
 type DbRow = {
   id: string;
@@ -136,35 +194,53 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
     } finally {
       setLoading(false);
     }
+    props.api.renderer.requestRender();
   }
 
-  async function refreshStatuses() {
-    try {
-      const result = await props.api.client.session.status();
-      const map = Array.isArray(result) ? {} : ((result as { data?: Record<string, SessionStatus> }).data ?? result);
-      setStatuses(new Map(Object.entries(map ?? {})));
-    } catch {
-      // keep previous statuses
+  // `state.session.status` is the host TUI's own synchronous, always-fresh
+  // per-session status (same family as state.session.question/permission),
+  // unlike the async bulk client.session.status() RPC which was found to
+  // miss/lag the process's own foreground session.
+  function localStatusesFromState(): Map<string, SessionStatus> {
+    const m = new Map<string, SessionStatus>();
+    for (const s of sessions()) {
+      const st = props.api.state.session.status(s.id);
+      if (st) m.set(s.id, st);
     }
+    return m;
+  }
+
+  function commitStatuses() {
+    const local = localStatusesFromState();
+    writeOwnStatuses(local);
+    setStatuses(mergeBusy(local, readCrossInstanceStatuses()));
+    props.api.renderer.requestRender();
   }
 
   refresh();
-  refreshStatuses();
-  const onEvent = () => refresh();
+  commitStatuses();
+  const onEvent = () => {
+    refresh();
+    commitStatuses();
+  };
   const unsub = props.api.event.on("session.updated", onEvent);
   const timer = setInterval(() => {
     refresh();
-    refreshStatuses();
+    commitStatuses();
   }, POLL_MS);
 
-  const unsubStatus = props.api.event.on("session.status", (event) => {
-    const { sessionID, status } = event.properties;
-    setStatuses((prev) => {
-      const next = new Map(prev);
-      next.set(sessionID, status);
-      return next;
+  const unsubStatus = props.api.event.on("session.status", () => commitStatuses());
+
+  let watcher: { close(): void } | undefined;
+  try {
+    ensureStatusDir();
+    watcher = fsWatch(STATUS_DIR, () => {
+      setStatuses(mergeBusy(localStatusesFromState(), readCrossInstanceStatuses()));
+      props.api.renderer.requestRender();
     });
-  });
+  } catch {
+    // fs.watch unsupported here; POLL_MS interval still reconciles
+  }
 
   const isWaiting = (id: string) =>
     props.api.state.session.question(id).length > 0 ||
@@ -189,6 +265,7 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
     unsub();
     unsubStatus();
     clearInterval(timer);
+    watcher?.close();
   });
 
   const active = createMemo(() =>
@@ -207,36 +284,42 @@ function SidebarSessions(props: { api: TuiPluginApi; session_id: string }) {
   const recentGrouped = createMemo(() => groupSessions(recent()));
 
   const renderRow = (s: SidebarSession) => {
-    const active = s.id === props.session_id;
-    const waiting = isWaiting(s.id);
-    const working = !waiting && isBusy(statuses().get(s.id));
-    const status = statuses().get(s.id);
-    const fg = active
-      ? theme.primary
-      : waiting
+    const isCurrent = s.id === props.session_id;
+    // fg/marker MUST stay as getters (not pre-computed values) so the JSX
+    // compiler keeps them reactive to tick()/statuses() - <For> only
+    // recreates a row when the session object identity changes, so a plain
+    // computed value here would freeze at whatever it was on first mount.
+    const waiting = () => isWaiting(s.id);
+    const working = () => !waiting() && isBusy(statuses().get(s.id));
+    const status = () => statuses().get(s.id);
+    const fg = () =>
+      waiting()
         ? theme.accent
-        : working
+        : working()
           ? theme.info
-          : status
-            ? theme.success
-            : theme.text;
-    const marker = waiting
-      ? Math.floor(tick() / 3) % 2 === 0
-        ? "❓"
-        : "  "
-      : working
-        ? SPINNER_FRAMES[tick() % SPINNER_FRAMES.length]
-        : active
-          ? "●"
-          : " ";
+          : isCurrent
+            ? theme.primary
+            : status()
+              ? theme.success
+              : theme.text;
+    const marker = () =>
+      waiting()
+        ? Math.floor(tick() / 3) % 2 === 0
+          ? "❓"
+          : "  "
+        : working()
+          ? SPINNER_FRAMES[tick() % SPINNER_FRAMES.length]
+          : isCurrent
+            ? "●"
+            : " ";
     return (
       <box
         paddingLeft={1}
         paddingRight={1}
         onMouseDown={(_e) => props.api.route.navigate("session", { sessionID: s.id })}
       >
-        <text fg={fg} wrapMode="none">
-          {marker} {sessionTitle(s)}
+        <text fg={fg()} wrapMode="none">
+          {marker()} {sessionTitle(s)}
         </text>
         <text fg={theme.textMuted} wrapMode="none">
           {" "}
