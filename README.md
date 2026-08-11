@@ -64,21 +64,23 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 
 | Option | Values | Default | Description |
 |---|---|---|---|
-| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `""` | `dots` | Working spinner style; `""` hides it |
-| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
-| `marker` | `dot`, `square`, `arrow`, `star`, `none` | `dot` | Active-session marker glyph |
+| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `""` | `dots` | Working spinner style; `""` hides it |
+| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `dots`, `eyeblink`, `bell`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
+| `marker` | `dot`, `square`, `arrow`, `star`, `none`, `caret`, `ping` | `dot` | Active-session marker glyph |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
+| `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
-Sessions with a non-busy status show a `•` marker; the active-session glyph
-stays visible even while its spinner is running. The sidebar is split into two
+With `openElsewhere` enabled, sessions running in another opencode instance show a `•` marker;
+the active-session glyph stays visible even while its spinner is running. The sidebar is split into two
 sections, each collapsible on click via the `▼`/`▶` toggle:
 
 - **Active** — the session you're in, plus anything busy, waiting, or updated
-  in the last 15 minutes
+  in the last 15 minutes. Idle rows in Active are green; no Active session
+  renders white.
 - **Recent** — the last 24 hours of work, plus the previous block of work
   before it (so a quiet gap, like a weekend, doesn't hide the last real batch
-  of sessions)
+  of sessions). Rows are white, as usual.
 
 Keybinds are configured through `tui.json`'s `keybinds` map, keyed by command
 name (custom keybinds are additive to the defaults):
