@@ -68,13 +68,13 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 | `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `gauge`, `speed`, `""` | `dots` | Working spinner style; `""` hides it |
 | `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `bounce`, `eyeblink`, `bell`, `help`, `bulb`, `ghost`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
 | `marker` | `dot`, `square`, `arrow`, `star`, `none`, `caret`, `ping`, `creation`, `sprout` | `dot` | Active-session marker glyph |
-| `preset` | `ping`, `term`, `braille` | — | Predefined look that overrides `spinner`/`waiting`/`marker` (see below) |
+| `preset` | `ping`, `term`, `braille`, `hex`, `moon`, `pie` | — | Predefined look that overrides `spinner`/`waiting`/`marker` (see below) |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
 | `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
 Some symbols (`battery`, `gauge`, `speed`, `eyeblink`, `bell`, `help`, `bulb`,
-`ghost`, `creation`, `sprout`, and the `ping` preset's waiting indicator) are
+`ghost`, `creation`, `sprout`, and the `ping`, `hex`, and `moon` presets) are
 Nerd Font glyphs and require a [patched Nerd Font](https://www.nerdfonts.com/)
 installed in your terminal — without one they render as boxes or nothing.
 
@@ -95,6 +95,17 @@ sections, each collapsible on click via the `▼`/`▶` toggle:
 - **`preset: "braille"`** — `●` marker, `⣾⣿` pulse while waiting, braille
   dots while working. Keeps the marker and spinner in separate cells.
 
+- **`preset: "hex"`** — hexagon theme: hexagon marker, hexagon/outline blink
+  while waiting, hexagon slices filling and draining while working. Combined.
+
+- **`preset: "moon"`** — lunar theme: new-moon marker, full/new moon blink
+  while waiting, the full 28-phase moon cycle (new → full → new) while
+  working. Combined.
+
+- **`preset: "pie"`** — progress-pie theme: full-slice marker, slice/full
+  blink while waiting, circle slices filling and draining while working.
+  Combined.
+
 - **Active** — the session you're in, plus anything busy, waiting, or updated
   in the last 15 minutes. Idle rows in Active are green; no Active session
   renders white.
@@ -112,6 +123,23 @@ name (custom keybinds are additive to the defaults):
 | Open session picker | `ctrl+o` | `session_surf.picker.open` |
 | Next session | `ctrl+x j` | `session_surf.next` |
 | Previous session | `ctrl+x k` | `session_surf.previous` |
+
+The picker itself has its own actions, also configurable through the same
+`keybinds` map and shown at the bottom of the popup:
+
+| Picker action | Default | Command |
+|---|---|---|
+| Switch to selected session | `enter` | `session_surf.picker.switch` |
+| Rename selected session | `ctrl+r` | `session_surf.picker.rename` |
+| Delete selected session | `ctrl+d` | `session_surf.picker.delete` |
+| Fork selected session | `ctrl+f` | `session_surf.picker.fork` |
+| Close the picker | `esc` | `session_surf.picker.close` |
+
+Rename and delete keep the picker open (a confirmation prompt appears first);
+fork closes it and switches to the new session, which keeps the original name
+the first time and gets a numbered suffix afterwards (`name (fork 2)`,
+`name (fork 3)`, …). Plain letter keys always stay free for search — only the
+control/arrow/enter/esc bindings above are captured while the picker is open.
 
 ```json
 {
