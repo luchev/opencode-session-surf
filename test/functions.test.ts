@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import type { SessionStatus } from "@opencode-ai/sdk";
+import stringWidth from "string-width";
 import {
   MARKERS,
   SPINNERS,
@@ -40,6 +41,19 @@ describe("markerGlyph", () => {
   });
   test("empty string disables the marker", () => {
     expect(markerGlyph("")).toBe("");
+  });
+});
+
+// The host (opentui 0.5.1) measures marker glyphs with string-width@7.2.0,
+// which counts emoji-regex matches as 2 cells. Any marker wider than 1 cell
+// shifts the session title right in the sidebar. e.g. U+25B6 "▶" is emoji
+// and renders 2 cells wide; U+25BA "►" is not.
+describe("MARKERS", () => {
+  test("every marker glyph is exactly 1 cell wide", () => {
+    for (const [name, glyph] of Object.entries(MARKERS)) {
+      if (glyph === "") continue; // none
+      expect(stringWidth(glyph), `${name} (${glyph})`).toBe(1);
+    }
   });
 });
 

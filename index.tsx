@@ -15,31 +15,46 @@ const POLL_MS = 3_000;
 const BLOCK_MS = 24 * 60 * 60 * 1000;
 const SPINNER_MS = 150;
 // Named styles, selectable via plugin options ({"spinner": "dots", "waiting": "emoji", "marker": "dot"}).
-type SpinnerName = "dots" | "arc" | "sweep" | "fill" | "bounce" | "sparkle" | "block";
+type SpinnerName = "dots" | "arc" | "sweep" | "fill" | "bounce" | "sparkle" | "block" | "battery" | "gauge" | "speed" | "none";
 export const SPINNERS: Record<SpinnerName, string[]> = {
   dots: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
   arc: ["◜", "◝", "◞", "◟"],
   sweep: ["◐", "◓", "◑", "◒"],
-  fill: ["░", "▒", "▓", "█"],
-  bounce: ["⠁", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"],
+  fill: ["░", "▒", "▓", "█", "▓", "▒"],
+  bounce: ["⠁", "⠂", "⠄", "⠂"],
   sparkle: ["✶", "✸", "✹", "✺", "✹", "✸"],
   block: ["▁", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃"],
+  battery: ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹", "󰂂", "󰂁", "󰂀", "󰁿", "󰁾", "󰁽", "󰁼", "󰁻"],
+  gauge: ["󰡳", "󰡵", "󰊚", "󰡴", "󰊚", "󰡵"],
+  speed: ["󰾆", "󰓅", "󰾅", "󰓅"],
+  none: [" "],
 };
-type WaitingName = "emoji" | "ellipsis" | "question" | "pulse" | "block";
+type WaitingName = "emoji" | "ellipsis" | "question" | "pulse" | "block" | "dots" | "eyeblink" | "bell" | "help" | "bulb" | "ghost" | "none";
 export const WAITERS: Record<WaitingName, string[]> = {
   emoji: ["❓", "  "],
   ellipsis: ["…", "  "],
   question: ["?", " "],
   pulse: ["⣾", "⣿"],
   block: ["█", " "],
+  dots: ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"],
+  eyeblink: ["󰈈", "󰛐"],
+  bell: ["󰂞", "󰂚"],
+  help: ["󰠗", "󰆆"],
+  bulb: ["󰛨", "󰛩"],
+  ghost: ["󰊠", "󱙝"],
+  none: [" "],
 };
-type MarkerName = "dot" | "square" | "arrow" | "star" | "none";
+type MarkerName = "dot" | "square" | "arrow" | "star" | "none" | "caret" | "ping" | "creation" | "sprout";
 export const MARKERS: Record<MarkerName, string> = {
   dot: "●",
-  square: "▪",
-  arrow: "▶",
+  square: "▣",
+  arrow: "►",
   star: "✦",
   none: "",
+  caret: "▸",
+  ping: "◉",
+  creation: "󰙴",
+  sprout: "󰹦",
 };
 // Empty string hides the indicator; unknown names fall back to the default.
 export function framesFor(map: Record<string, string[]>, value: unknown, fallback: string[]): string[] {
@@ -247,6 +262,7 @@ export function SessionRow(props: {
   status: () => SessionStatus | undefined;
   theme: RowTheme;
   onNavigate: () => void;
+  openElsewhere: boolean;
 }) {
   const fg = () =>
     props.waiting()
@@ -259,11 +275,12 @@ export function SessionRow(props: {
             ? props.theme.success
             : props.theme.text;
   // Marker never renders empty: the cell stays reserved so titles keep a
-  // fixed column whether or not a spinner is showing.
+  // fixed column whether or not a spinner is showing. The has-status dot is
+  // opt-in via the "openElsewhere" option (off by default).
   const marker = () =>
     props.isCurrent
       ? props.marker
-      : props.status() && !isBusy(props.status())
+      : props.openElsewhere && props.status() && !isBusy(props.status())
         ? "•"
         : " ";
   return (
@@ -300,6 +317,7 @@ function SidebarSessions(props: {
   waiting: string[];
   marker: string;
   pollMs: number;
+  openElsewhere: boolean;
 }) {
   const theme = props.api.theme.current;
   const [sessions, setSessions] = createSignal<SidebarSession[]>([]);
@@ -437,6 +455,7 @@ function SidebarSessions(props: {
       status={() => statuses().get(s.id)}
       theme={theme}
       onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
+      openElsewhere={props.openElsewhere}
     />
   );
 
@@ -527,6 +546,7 @@ const plugin: TuiPluginModule = {
     const spinner = framesFor(SPINNERS, options?.spinner, SPINNERS.dots);
     const waiting = framesFor(WAITERS, options?.waiting, WAITERS.pulse);
     const marker = markerGlyph(options?.marker);
+    const openElsewhere = options?.openElsewhere === true;
     const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     api.slots.register({
       order: 300,
@@ -540,6 +560,7 @@ const plugin: TuiPluginModule = {
               waiting={waiting}
               marker={marker}
               pollMs={pollMs}
+              openElsewhere={openElsewhere}
             />
           );
         },

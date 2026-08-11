@@ -43,6 +43,7 @@ describe("SessionRow", () => {
         status={() => status("busy")}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={false}
       />
     ));
     expect(frame).toContain(SPINNERS.arc[0]);
@@ -63,6 +64,7 @@ describe("SessionRow", () => {
         status={() => undefined}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={false}
       />
     ));
     expect(frame).toContain("✦");
@@ -82,6 +84,7 @@ describe("SessionRow", () => {
         status={() => undefined}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={false}
       />
     ));
     expect(frame).toContain(WAITERS.ellipsis[0]);
@@ -101,6 +104,7 @@ describe("SessionRow", () => {
         status={() => undefined}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={false}
       />
     ));
     expect(frame).not.toContain("●");
@@ -108,7 +112,7 @@ describe("SessionRow", () => {
     expect(frame).toContain("surfer");
   });
 
-  test("has-status row shows the • dot", async () => {
+  test("has-status row shows the • dot when enabled", async () => {
     const frame = await frameFor(() => (
       <SessionRow
         s={session}
@@ -121,9 +125,30 @@ describe("SessionRow", () => {
         status={() => status("idle")}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={true}
       />
     ));
     expect(frame).toContain("•");
+  });
+
+  test("has-status dot is hidden by default", async () => {
+    const frame = await frameFor(() => (
+      <SessionRow
+        s={session}
+        isCurrent={false}
+        marker="●"
+        waitingFrames={[]}
+        spinnerFrames={[]}
+        waiting={() => false}
+        working={() => false}
+        status={() => status("idle")}
+        theme={theme}
+        onNavigate={() => {}}
+        openElsewhere={false}
+      />
+    ));
+    expect(frame).not.toContain("•");
+    expect(frame).toContain("surfer");
   });
 
   test("title column is stable whether or not a spinner shows", async () => {
@@ -139,6 +164,7 @@ describe("SessionRow", () => {
         status={() => status("busy")}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={false}
       />
     ));
     const idle = await frameFor(() => (
@@ -153,6 +179,7 @@ describe("SessionRow", () => {
         status={() => undefined}
         theme={theme}
         onNavigate={() => {}}
+        openElsewhere={false}
       />
     ));
     expect(busy.indexOf("surfer")).toBe(idle.indexOf("surfer"));
