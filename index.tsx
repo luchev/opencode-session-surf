@@ -670,6 +670,21 @@ export function trimEllipsis(text: string, max: number): string {
   return text.slice(0, max - 1) + "…";
 }
 
+// Move the selection by `delta`, wrapping around both ends (down past the last
+// item lands on the first, up past the first lands on the last). Exported for
+// testing.
+export function wrapIndex(current: number, delta: number, total: number): number {
+  if (total <= 0) return 0;
+  return (((current + delta) % total) + total) % total;
+}
+
+// Optimistic rename: return the list with `id`'s title replaced, so the picker
+// reflects the new name instantly without waiting for the DB round-trip.
+// Exported for testing.
+export function applyRename(sessions: SidebarSession[], id: string, title: string): SidebarSession[] {
+  return sessions.map((s) => (s.id === id ? { ...s, title } : s));
+}
+
 type PickerDensity = "compact" | "comfortable";
 
 type PickerTheme = Pick<
@@ -781,10 +796,11 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
     unregisterLayer?.();
     unregisterLayer = undefined;
   };
-  let closing = false;
+  // Full dismissal (esc / switch). The host's dialog.replace() fires the prior
+  // entry's onClose on every swap, so the picker registers `unregister` (not
+  // `close`) as its onClose — otherwise opening the rename/delete dialog would
+  // trip a full close mid-transition and wedge the dialog stack.
   const close = () => {
-    if (closing) return;
-    closing = true;
     unregister();
     api.ui.dialog.clear();
   };
@@ -802,8 +818,8 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         { name: "session_surf.picker.rename", title: "Rename session", run: doRename },
         { name: "session_surf.picker.delete", title: "Delete session", run: doDelete },
         { name: "session_surf.picker.fork", title: "Fork session", run: doFork },
-        { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => { const n = filtered().length; return n === 0 ? 0 : (i - 1 + n) % n; }) },
-        { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => { const n = filtered().length; return n === 0 ? 0 : (i + 1) % n; }) },
+        { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => wrapIndex(i, -1, filtered().length)) },
+        { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => wrapIndex(i, 1, filtered().length)) },
         { name: "session_surf.picker.close", title: "Close picker", run: close },
       ],
       bindings: [
@@ -904,7 +920,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
           {hint("session_surf.picker.fork", "fork")}
         </box>
       </box>
-    ), close);
+    ), unregister);
   };
 
   function doRename(): void {
@@ -919,12 +935,17 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         onConfirm={(v) => {
           const t = v.trim();
           if (t) {
+            // Optimistic: update the in-memory list right away so the reopened
+            // picker shows the new title instantly; the server call syncs in the
+            // background (the next dbSessions() read reconciles it).
+            setSessions((prev) => applyRename(prev, s.id, t));
             void api.client.session.update({ sessionID: s.id, title: t });
-            setSessions(dbSessions());
           }
-          show();
+          // Reopen after the host finishes closing its own dialog, otherwise
+          // our replace() is clobbered by the host's post-confirm close.
+          queueMicrotask(show);
         }}
-        onCancel={() => show()}
+        onCancel={() => queueMicrotask(show)}
       />
     ));
   }
@@ -946,9 +967,10 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
               api.route.navigate("session", { sessionID: remaining[0].id });
             }
           })();
-          show();
+          // Reopen after the host finishes closing its own dialog.
+          queueMicrotask(show);
         }}
-        onCancel={() => show()}
+        onCancel={() => queueMicrotask(show)}
       />
     ));
   }

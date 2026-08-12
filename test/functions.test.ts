@@ -8,6 +8,8 @@ import {
   WAITERS,
   centerScrollTop,
   trimEllipsis,
+  wrapIndex,
+  applyRename,
   framesFor,
   fuzzyRank,
   fuzzyScore,
@@ -58,6 +60,42 @@ describe("trimEllipsis", () => {
   test("degenerate widths", () => {
     expect(trimEllipsis("abc", 0)).toBe("");
     expect(trimEllipsis("abc", 1)).toBe("…");
+  });
+});
+
+describe("wrapIndex", () => {
+  test("moves within bounds", () => {
+    expect(wrapIndex(0, 1, 5)).toBe(1);
+    expect(wrapIndex(3, -1, 5)).toBe(2);
+  });
+  test("wraps past the bottom to the top", () => {
+    expect(wrapIndex(4, 1, 5)).toBe(0);
+  });
+  test("wraps past the top to the bottom", () => {
+    expect(wrapIndex(0, -1, 5)).toBe(4);
+  });
+  test("empty list stays at 0", () => {
+    expect(wrapIndex(0, 1, 0)).toBe(0);
+    expect(wrapIndex(0, -1, 0)).toBe(0);
+  });
+});
+
+describe("applyRename", () => {
+  const sessions = [
+    { id: "a", projectID: "p", directory: "/x", title: "one", time: { created: 0, updated: 0 } },
+    { id: "b", projectID: "p", directory: "/y", title: "two", time: { created: 0, updated: 0 } },
+  ];
+  test("replaces only the matching session's title", () => {
+    const out = applyRename(sessions, "b", "renamed");
+    expect(out.map((s) => s.title)).toEqual(["one", "renamed"]);
+  });
+  test("leaves the list unchanged when the id is absent", () => {
+    expect(applyRename(sessions, "zzz", "x").map((s) => s.title)).toEqual(["one", "two"]);
+  });
+  test("does not mutate the input", () => {
+    const before = sessions.map((s) => s.title);
+    applyRename(sessions, "a", "changed");
+    expect(sessions.map((s) => s.title)).toEqual(before);
   });
 });
 
