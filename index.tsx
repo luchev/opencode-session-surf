@@ -2,6 +2,7 @@
 /** @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, onCleanup, For, Show } from "solid-js";
 import type { TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui";
+import type { BoxRenderable } from "@opentui/core";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { Database } from "bun:sqlite";
 import { mkdirSync, readdirSync, readFileSync, appendFileSync, watch as fsWatch, writeFileSync } from "node:fs";
@@ -651,6 +652,116 @@ function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
   if (next) api.route.navigate("session", { sessionID: next.id });
 }
 
+// Scroll offset (in rows) that keeps the selected row centered: it stays put
+// while in the top or bottom half of the window, otherwise the window scrolls
+// one row per move so the selection sits mid-window. Mirrors the host command
+// palette. Exported for testing.
+export function centerScrollTop(index: number, visible: number, total: number): number {
+  const half = Math.floor(visible / 2);
+  return Math.max(0, Math.min(index - half, Math.max(0, total - visible)));
+}
+
+// Truncate to `max` columns, adding an ellipsis when it doesn't fit. Exported
+// for testing. Char-length based (session titles/dirs are effectively ASCII).
+export function trimEllipsis(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  if (max === 1) return "…";
+  return text.slice(0, max - 1) + "…";
+}
+
+type PickerDensity = "compact" | "comfortable";
+
+type PickerTheme = Pick<
+  TuiThemeCurrent,
+  "text" | "textMuted" | "info" | "primary" | "success" | "error" | "selectedListItemText"
+>;
+
+// The session list inside the picker. Renders only the visible window of rows,
+// positioned by centerScrollTop so the selection stays centered (mirrors the
+// host command palette). Virtualized rather than a scrolling scrollbox so the
+// window is deterministic and doesn't depend on post-layout scroll clamping.
+// Two densities: "compact" (one line: name + age + dir) and "comfortable"
+// (two lines: name, then age left / dir right). Exported for direct testing.
+export function PickerList(props: {
+  sessions: () => SidebarSession[];
+  index: () => number;
+  statuses: Map<string, SessionStatus>;
+  height: () => number;
+  width: number;
+  density: PickerDensity;
+  theme: PickerTheme;
+  onSelect: (s: SidebarSession) => void;
+}) {
+  const rowLines = props.density === "comfortable" ? 2 : 1;
+  const visible = () => Math.max(1, Math.floor(props.height() / rowLines));
+  const window = createMemo(() => {
+    const all = props.sessions();
+    const top = centerScrollTop(props.index(), visible(), all.length);
+    return all.slice(top, top + visible()).map((s, k) => ({ s, i: top + k }));
+  });
+  // Truncation needs the real inner width. The rows fill their parent
+  // (width "100%") so they never overflow the dialog regardless; we measure the
+  // laid-out width and use it for the ellipsis math, falling back to the passed
+  // estimate until the first layout/resize lands.
+  const [measured, setMeasured] = createSignal(0);
+  const w = () => (measured() > 0 ? measured() : props.width);
+  const attachMeasure = (el: BoxRenderable) => {
+    const ev = el as unknown as {
+      on(e: string, cb: () => void): void;
+      off(e: string, cb: () => void): void;
+    };
+    const update = () => setMeasured(el.width);
+    update();
+    ev.on("resized", update);
+    onCleanup(() => ev.off("resized", update));
+  };
+  const rowColor = (s: SidebarSession) => {
+    const st = props.statuses.get(s.id);
+    return st === undefined
+      ? props.theme.text
+      : isBusy(st)
+        ? props.theme.info
+        : st.type === "idle"
+          ? props.theme.success
+          : props.theme.error;
+  };
+  return (
+    <box ref={attachMeasure} flexDirection="column" width="100%" height={props.height()}>
+      <For each={window()}>
+        {(row) => {
+          const sel = row.i === props.index();
+          const nameFg = sel ? props.theme.selectedListItemText : rowColor(row.s);
+          const metaFg = sel ? props.theme.selectedListItemText : props.theme.textMuted;
+          const age = relTime(row.s.time.updated);
+          const dir = shortDir(row.s.directory);
+          if (props.density === "comfortable") {
+            const name = trimEllipsis(sessionTitle(row.s), w());
+            const dirText = trimEllipsis(dir, Math.max(0, w() - age.length - 1));
+            return (
+              <box flexDirection="column" width="100%" height={2} backgroundColor={sel ? props.theme.primary : undefined} onMouseDown={() => props.onSelect(row.s)}>
+                <text fg={nameFg} wrapMode="none">{name}</text>
+                <box flexDirection="row" width="100%" justifyContent="space-between">
+                  <text fg={metaFg} wrapMode="none">{age}</text>
+                  <text fg={metaFg} wrapMode="none">{dirText}</text>
+                </box>
+              </box>
+            );
+          }
+          const right = `${age} ${dir}`;
+          const name = trimEllipsis(sessionTitle(row.s), Math.max(0, w() - right.length - 2));
+          return (
+            <box flexDirection="row" width="100%" justifyContent="space-between" height={1} backgroundColor={sel ? props.theme.primary : undefined} onMouseDown={() => props.onSelect(row.s)}>
+              <text fg={nameFg} wrapMode="none">{name}</text>
+              <text fg={metaFg} wrapMode="none">{right}</text>
+            </box>
+          );
+        }}
+      </For>
+    </box>
+  );
+}
+
 // The host's DialogSelect only substring-matches option titles, so the picker
 // is a custom dialog instead: a fuzzy-filtered session list with a search
 // input, plus a temporary keymap layer whose bindings (configurable through
@@ -658,7 +769,7 @@ function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
 // the session actions shown in the hint bar at the bottom. Bare keystrokes
 // fall through the layer to the search input, so typing filters the list at
 // all times.
-function openPicker(api: TuiPluginApi): void {
+function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void {
   const theme = api.theme.current;
   const [query, setQuery] = createSignal("");
   const [sessions, setSessions] = createSignal<SidebarSession[]>(dbSessions());
@@ -715,7 +826,14 @@ function openPicker(api: TuiPluginApi): void {
       ],
     };
     unregisterLayer = api.keymap.registerLayer(layer);
-    const bindings = api.tuiConfig.keybinds.gather("session_surf", [
+    const defaultKeys: Record<string, string> = {
+      "session_surf.picker.switch": "enter",
+      "session_surf.picker.rename": "ctrl+r",
+      "session_surf.picker.delete": "ctrl+d",
+      "session_surf.picker.fork": "ctrl+f",
+      "session_surf.picker.close": "esc",
+    };
+    const overrides = api.tuiConfig.keybinds.gather("session_surf", [
       "session_surf.picker.switch",
       "session_surf.picker.rename",
       "session_surf.picker.delete",
@@ -723,13 +841,15 @@ function openPicker(api: TuiPluginApi): void {
       "session_surf.picker.close",
     ]);
     const hintKey = (cmd: string) => {
-      const b = bindings.find((x) => x.cmd === cmd);
-      return b && typeof b.key === "string" ? b.key : cmd;
+      const b = overrides.find((x) => x.cmd === cmd);
+      return b && typeof b.key === "string" ? b.key : defaultKeys[cmd] ?? cmd;
     };
     const hint = (cmd: string, label: string) => (
       <box flexDirection="row">
         <text fg={theme.accent}><b>{hintKey(cmd)}</b></text>
-        <text fg={theme.textMuted}>{` ${label}`}{"   "}</text>
+        <box width={1} />
+        <text fg={theme.textMuted}>{label}</text>
+        <box width={3} />
       </box>
     );
     // Status per session (local state first, then other instances' broadcasts)
@@ -745,59 +865,41 @@ function openPicker(api: TuiPluginApi): void {
         if (!statuses.has(id)) statuses.set(id, st);
       }
     }
-    // Wide panel (like the host's move-session dialog); the list is capped to
-    // the terminal height so the panel never touches the screen edges.
     api.ui.dialog.setSize("xlarge");
-    const budget = 114;
-    const maxListHeight = Math.max(3, (api.renderer.height > 20 ? api.renderer.height : 30) - 12);
-    const listHeight = createMemo(() => Math.min(filtered().length, maxListHeight));
-    const trimText = (t: string, max: number) => (t.length <= max ? t : t.slice(0, Math.max(0, max - 1)) + "…");
-    // The host wraps stack content in its own centered dialog overlay; adding
-    // a nested <api.ui.Dialog> would render a second overlay that anchors to
-    // the first panel's corner in the real host (bottom-right in 1.18.15).
+    const rowLines = density === "comfortable" ? 2 : 1;
+    const contentWidth = Math.max(20, Math.min((api.renderer.width || 130) - 10, 114));
+    const maxListHeight = Math.max(3, Math.min(20, (api.renderer.height > 20 ? api.renderer.height : 30) - 10));
+    const listHeight = createMemo(() => Math.min(filtered().length * rowLines, maxListHeight));
     api.ui.dialog.replace(() => (
-      <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-        <text fg={theme.text}><b>Switch Session</b></text>
+      <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+        <box flexDirection="row" justifyContent="space-between">
+          <text fg={theme.text}><b>Switch Session</b></text>
+          <text fg={theme.textMuted}>esc</text>
+        </box>
+        <box height={1} />
         <input
           value={query()}
           onInput={setQuery}
-          placeholder="Search sessions..."
+          placeholder="Search"
           focused
         />
+        <box height={1} />
         <Show when={filtered().length > 0} fallback={<text fg={theme.textMuted}>No sessions match</text>}>
-          <scrollbox height={listHeight()} scrollY>
-            <For each={filtered()}>
-              {(s, i) => {
-                const st = statuses.get(s.id);
-                const col =
-                  st === undefined
-                    ? theme.text
-                    : isBusy(st)
-                      ? theme.info
-                      : st.type === "idle"
-                        ? theme.success
-                        : theme.error;
-                const age = relTime(s.time.updated);
-                const dirMax = Math.max(4, budget - age.length - 2);
-                return (
-                  <box flexDirection="column" onMouseDown={() => switchTo(s)}>
-                    <text fg={i() === index() ? theme.accent : col}>{trimText(sessionTitle(s), budget)}</text>
-                    <box flexDirection="row" justifyContent="space-between">
-                      <text fg={theme.textMuted}>{age}</text>
-                      <text fg={theme.textMuted}>{trimText(shortDir(s.directory), dirMax)}</text>
-                    </box>
-                  </box>
-                );
-              }}
-            </For>
-          </scrollbox>
+          <PickerList
+            sessions={filtered}
+            index={index}
+            statuses={statuses}
+            height={listHeight}
+            width={contentWidth}
+            density={density}
+            theme={theme}
+            onSelect={switchTo}
+          />
         </Show>
         <box flexDirection="row" paddingTop={1}>
-          {hint("session_surf.picker.switch", "switch")}
           {hint("session_surf.picker.rename", "rename")}
           {hint("session_surf.picker.delete", "delete")}
           {hint("session_surf.picker.fork", "fork")}
-          {hint("session_surf.picker.close", "close")}
         </box>
       </box>
     ), close);
@@ -897,6 +999,8 @@ const plugin: TuiPluginModule = {
     const markerGlyphName = preset?.marker ?? marker;
     const combined = preset?.combined ?? false;
     const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
+    // Picker row layout: "compact" (one line) or "comfortable" (two lines).
+    const density: PickerDensity = options?.density === "comfortable" ? "comfortable" : "compact";
     api.slots.register({
       order: 300,
       slots: {
@@ -928,7 +1032,7 @@ const plugin: TuiPluginModule = {
           category: "Session",
           namespace: "palette",
           run() {
-            openPicker(api);
+            openPicker(api, density);
           },
         },
         {

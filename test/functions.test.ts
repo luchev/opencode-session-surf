@@ -6,6 +6,8 @@ import {
   PRESETS,
   SPINNERS,
   WAITERS,
+  centerScrollTop,
+  trimEllipsis,
   framesFor,
   fuzzyRank,
   fuzzyScore,
@@ -17,6 +19,47 @@ import {
   shortDir,
   forkTitle,
 } from "../index.tsx";
+
+describe("centerScrollTop", () => {
+  const visible = 10;
+  const total = 100;
+  test("stays at the top while the selection is in the top half", () => {
+    expect(centerScrollTop(0, visible, total)).toBe(0);
+    expect(centerScrollTop(4, visible, total)).toBe(0);
+    expect(centerScrollTop(5, visible, total)).toBe(0);
+  });
+  test("centers the selection in the middle", () => {
+    // half = 5, so scrollTop tracks index - 5
+    expect(centerScrollTop(50, visible, total)).toBe(45);
+    expect(centerScrollTop(51, visible, total)).toBe(46);
+    // one move -> one row of scroll
+    expect(centerScrollTop(51, visible, total) - centerScrollTop(50, visible, total)).toBe(1);
+  });
+  test("clamps to the bottom while the selection is in the bottom half", () => {
+    const maxTop = total - visible; // 90
+    expect(centerScrollTop(95, visible, total)).toBe(maxTop);
+    expect(centerScrollTop(99, visible, total)).toBe(maxTop);
+  });
+  test("never scrolls when everything fits", () => {
+    expect(centerScrollTop(3, 10, 5)).toBe(0);
+    expect(centerScrollTop(9, 10, 10)).toBe(0);
+  });
+});
+
+describe("trimEllipsis", () => {
+  test("returns the text unchanged when it fits", () => {
+    expect(trimEllipsis("hello", 5)).toBe("hello");
+    expect(trimEllipsis("hi", 10)).toBe("hi");
+  });
+  test("truncates with an ellipsis when too long", () => {
+    expect(trimEllipsis("OpenCode side panel", 10)).toBe("OpenCode …");
+    expect(trimEllipsis("abcdef", 4)).toBe("abc…");
+  });
+  test("degenerate widths", () => {
+    expect(trimEllipsis("abc", 0)).toBe("");
+    expect(trimEllipsis("abc", 1)).toBe("…");
+  });
+});
 
 describe("framesFor", () => {
   test("returns frames for a known name", () => {
