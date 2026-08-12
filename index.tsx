@@ -5,9 +5,9 @@ import type { TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-a
 import type { BoxRenderable } from "@opentui/core";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { Database } from "bun:sqlite";
-import { mkdirSync, readdirSync, readFileSync, appendFileSync, watch as fsWatch, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, appendFileSync, statSync, watch as fsWatch, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 const POLL_MS = 3_000;
 // A "work block" window: Recent shows the last BLOCK_MS of work plus the
@@ -338,11 +338,36 @@ export function recentSessions(sessions: SidebarSession[], now = Date.now()): Si
   return out;
 }
 
+// Stable ordering for the Active section: by displayed name, so a session
+// updating doesn't reshuffle the list. Ties (same name) fall back to id.
+export function bySessionTitle(a: SidebarSession, b: SidebarSession): number {
+  return (
+    sessionTitle(a).localeCompare(sessionTitle(b), undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id)
+  );
+}
+
 export function isBusy(status: SessionStatus | undefined): boolean {
   return status?.type === "busy" || status?.type === "retry";
 }
 
 type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" | "primary" | "success">;
+
+// Foreground color for a sidebar row's title. The focused session is always
+// the primary (orange) color, whatever its state — busy/asking colors are for
+// other sessions only. Otherwise: asking → accent, working → info, sessions
+// with a status or idle-in-Active → success, everything else → text.
+export function rowForeground<T>(
+  s: { waiting: boolean; working: boolean; isCurrent: boolean; hasStatus: boolean; inActive: boolean },
+  theme: { primary: T; accent: T; info: T; success: T; text: T; textMuted: T },
+): T {
+  if (s.isCurrent) return theme.primary;
+  if (s.waiting) return theme.accent;
+  if (s.working) return theme.info;
+  if (s.hasStatus) return theme.success;
+  // Idle sessions are green while in the Active section; nothing in Active is
+  // white. Recent rows use the default text color.
+  return s.inActive ? theme.success : theme.text;
+}
 
 // One sidebar row. Marker/spinner getters stay reactive to signal changes;
 // exported for direct testing.
@@ -362,19 +387,16 @@ export function SessionRow(props: {
   combined: boolean;
 }) {
   const fg = () =>
-    props.waiting()
-      ? props.theme.accent
-      : props.working()
-        ? props.theme.info
-        : props.isCurrent
-          ? props.theme.primary
-          : props.status()
-            ? props.theme.success
-            // Idle sessions are green while in the Active section; nothing
-            // in Active is white. Recent rows use the default text color.
-            : props.inActive
-              ? props.theme.success
-              : props.theme.text;
+    rowForeground(
+      {
+        waiting: props.waiting(),
+        working: props.working(),
+        isCurrent: props.isCurrent,
+        hasStatus: !!props.status(),
+        inActive: props.inActive,
+      },
+      props.theme,
+    );
   // Non-combined mode: the marker cell stays reserved so titles keep a
   // fixed column whether or not a spinner shows. The has-status dot is
   // opt-in via the "openElsewhere" option (off by default).
@@ -421,10 +443,10 @@ export function SessionRow(props: {
             {marker()}
           </text>
           <box width={1}>
-            <Show when={props.waiting() && props.waitingFrames.length > 0}>
+            <Show when={!props.isCurrent && props.waiting() && props.waitingFrames.length > 0}>
               <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
             </Show>
-            <Show when={props.working() && props.spinnerFrames.length > 0}>
+            <Show when={!props.isCurrent && props.working() && props.spinnerFrames.length > 0}>
               <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
             </Show>
           </box>
@@ -561,13 +583,16 @@ function SidebarSessions(props: {
   });
 
   const active = createMemo(() =>
-    sessions().filter((s) => {
-      // the session you're in is always Active, regardless of status/freshness
-      if (s.id === props.session_id) return true;
-      const st = statuses().get(s.id);
-      const fresh = s.time.updated >= Date.now() - ACTIVE_MS;
-      return isBusy(st) || isWaiting(s.id) || fresh;
-    }),
+    sessions()
+      .filter((s) => {
+        // the session you're in is always Active, regardless of status/freshness
+        if (s.id === props.session_id) return true;
+        const st = statuses().get(s.id);
+        const fresh = s.time.updated >= Date.now() - ACTIVE_MS;
+        return isBusy(st) || isWaiting(s.id) || fresh;
+      })
+      // by name, not recency: updates bump recency but must not reshuffle the list
+      .sort(bySessionTitle),
   );
   const activeIds = createMemo(() => new Set(active().map((s) => s.id)));
 
@@ -650,6 +675,311 @@ function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
   const idx = list.findIndex((s) => s.id === currentID);
   const next = list[((idx === -1 ? 0 : idx) + delta + list.length) % list.length];
   if (next) api.route.navigate("session", { sessionID: next.id });
+}
+
+// Normalize a user-typed path: expand a leading ~ to the home directory and
+// resolve to an absolute path. Exported for testing.
+export function expandPath(input: string): string {
+  const t = input.trim();
+  if (!t) return "";
+  if (t === "~") return homedir();
+  if (t.startsWith("~/")) return resolve(join(homedir(), t.slice(1)));
+  return resolve(t);
+}
+
+// A random id with the given prefix, shaped like the server's own ids
+// ("ses_...", "msg_...", "part_...") so consumers treat them the same.
+export function newId(prefix: string): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let s = "";
+  for (let i = 0; i < 24; i++) s += chars[(Math.random() * chars.length) | 0];
+  return prefix + s;
+}
+
+// Recursively replace any string that appears as an id in `map` with its new
+// value — both values and keys, at any nesting depth. Used to rewire the
+// parent/child references inside copied message and part JSON after a fork.
+export function remapIds(value: unknown, map: Map<string, string>): unknown {
+  if (typeof value === "string") return map.get(value) ?? value;
+  if (Array.isArray(value)) return value.map((v) => remapIds(v, map));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[map.get(k) ?? k] = remapIds(v, map);
+    return out;
+  }
+  return value;
+}
+
+function remapJson(raw: string, map: Map<string, string>): string {
+  try {
+    return JSON.stringify(remapIds(JSON.parse(raw), map));
+  } catch {
+    return raw; // malformed row: carry it over untouched rather than fail the fork
+  }
+}
+
+type SessionRow = Record<string, unknown>;
+type MessageRow = { id: string; time_created: number; time_updated: number; data: string };
+type PartRow = MessageRow & { message_id: string; session_id: string };
+
+// Duplicate a session for a fork: new session row (fresh id/slug, chosen
+// directory, null parent, titles/times overridden, every other column copied
+// verbatim so future schema columns survive), messages and parts copied with
+// fresh ids and their JSON rewired so references point inside the copy —
+// mirroring what the server's own fork does. Pure; the caller handles storage.
+export function forkSessionRows(
+  src: SessionRow,
+  messages: MessageRow[],
+  parts: PartRow[],
+  target: { id: string; slug: string; directory: string; title: string; sourceId: string },
+): {
+  session: SessionRow;
+  messages: (MessageRow & { session_id: string })[];
+  parts: PartRow[];
+} {
+  const session: SessionRow = {
+    ...src,
+    id: target.id,
+    slug: target.slug,
+    directory: target.directory,
+    path: "",
+    parent_id: null,
+    title: target.title,
+    time_created: Date.now(),
+    time_updated: Date.now(),
+  };
+  const msgMap = new Map<string, string>();
+  for (const m of messages) msgMap.set(m.id, newId("msg_"));
+  const partMap = new Map<string, string>();
+  for (const p of parts) partMap.set(p.id, newId("part_"));
+  const idMap = new Map<string, string>([...msgMap, ...partMap, [target.sourceId, target.id]]);
+  const newMessages: (MessageRow & { session_id: string })[] = messages.map((m) => ({
+    id: msgMap.get(m.id)!,
+    session_id: target.id,
+    time_created: m.time_created,
+    time_updated: m.time_updated,
+    data: remapJson(m.data, idMap),
+  }));
+  const newParts: PartRow[] = parts.map((p) => ({
+    id: partMap.get(p.id)!,
+    message_id: msgMap.get(p.message_id) ?? p.message_id,
+    session_id: target.id,
+    time_created: p.time_created,
+    time_updated: p.time_updated,
+    data: remapJson(p.data, idMap),
+  }));
+  return { session, messages: newMessages, parts: newParts };
+}
+
+type ForkResult = { ok: true; sessionId: string } | { ok: false; reason: "db" | "schema" | "missing" };
+
+let dbw: Database | undefined;
+function getWriteDb(): Database | undefined {
+  if (dbw) return dbw;
+  try {
+    dbw = new Database(DB_PATH, { readwrite: true });
+    dbw.exec("PRAGMA busy_timeout = 10000");
+    return dbw;
+  } catch {
+    return undefined;
+  }
+}
+
+function insert(db: Database, table: string, row: Record<string, unknown>): void {
+  const cols = Object.keys(row);
+  db.query(`INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(
+    ...cols.map((c) => row[c]),
+  );
+}
+
+// Fork the source session into `directory`, copying its full conversation.
+// There is no API that both sets a directory and copies the conversation
+// (update/fork/import all ignore directory or drop messages), so the copy
+// happens at the storage layer, mirroring the server's fork semantics.
+export function forkSessionToDirectory(sourceId: string, directory: string, title: string): ForkResult {
+  const db = getWriteDb();
+  if (!db) return { ok: false, reason: "db" };
+  const has = (t: string) =>
+    (db.query(`PRAGMA table_info(${t})`).all() as unknown[]).length > 0;
+  if (!has("session") || !has("message") || !has("part")) return { ok: false, reason: "schema" };
+  const src = db.query("SELECT * FROM session WHERE id = ?").get(sourceId) as SessionRow | null;
+  if (!src) return { ok: false, reason: "missing" };
+  const messages = db
+    .query("SELECT id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created")
+    .all(sourceId) as MessageRow[];
+  const parts = db
+    .query("SELECT id, message_id, session_id, time_created, time_updated, data FROM part WHERE session_id = ? ORDER BY time_created")
+    .all(sourceId) as PartRow[];
+  const slug = `${String(src.slug ?? "session")}-${newId("").slice(0, 6)}`;
+  const forked = forkSessionRows(src, messages, parts, {
+    id: newId("ses_"),
+    slug,
+    directory,
+    title,
+    sourceId,
+  });
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    insert(db, "session", forked.session);
+    for (const m of forked.messages) insert(db, "message", m);
+    for (const p of forked.parts) insert(db, "part", p);
+    db.exec("COMMIT");
+  } catch {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    return { ok: false, reason: "db" };
+  }
+  return { ok: true, sessionId: forked.session.id as string };
+}
+
+// Leader-chord global action (ctrl+x w): prompt for a new working directory
+// and fork the current session into it — a new session, full conversation
+// copied, pointing at the chosen directory. A custom dialog (like the picker)
+// so Tab can shell-complete paths; enter confirms, esc cancels. Success lands
+// in the forked session.
+function changeDirectory(api: TuiPluginApi): void {
+  const id = currentSessionID(api);
+  if (!id) {
+    api.ui.toast({ variant: "warning", message: "No active session" });
+    return;
+  }
+  const theme = api.theme.current;
+  const me = dbSessions().find((s) => s.id === id);
+  const [path, setPath] = createSignal(me?.directory ?? "");
+  const [candidates, setCandidates] = createSignal<string[]>([]);
+  let unregisterLayer: (() => void) | undefined;
+  const unregister = () => {
+    unregisterLayer?.();
+    unregisterLayer = undefined;
+  };
+  const close = () => {
+    unregister();
+    api.ui.dialog.clear();
+  };
+  const complete = () => {
+    const c = completePath(path());
+    setPath(c.value);
+    setCandidates(c.candidates);
+  };
+  const confirm = () => {
+    const dir = expandPath(path());
+    if (!dir) return;
+    void (async () => {
+      try {
+        if (!statSync(dir).isDirectory()) {
+          api.ui.toast({ variant: "error", message: "Not a directory" });
+          return;
+        }
+        const base = me ? sessionTitle(me) : "Session";
+        const res = forkSessionToDirectory(id, dir, forkTitle(base, dbSessions()));
+        if (res.ok) {
+          close();
+          api.ui.toast({ variant: "info", message: `Forked into ${shortDir(dir)}` });
+          api.route.navigate("session", { sessionID: res.sessionId });
+        } else {
+          api.ui.toast({
+            variant: "error",
+            message: res.reason === "schema" ? "Fork failed: unsupported database" : "Fork failed",
+          });
+        }
+      } catch {
+        api.ui.toast({ variant: "error", message: "Fork failed" });
+      }
+    })();
+  };
+  const hint = (key: string, label: string) => (
+    <box flexDirection="row">
+      <text fg={theme.accent}><b>{key}</b></text>
+      <box width={1} />
+      <text fg={theme.textMuted}>{label}</text>
+      <box width={3} />
+    </box>
+  );
+  unregister();
+  api.ui.dialog.setSize("medium");
+  api.ui.dialog.replace(
+    () => (
+      <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+        <text fg={theme.text}><b>Fork session in directory</b></text>
+        <box height={1} />
+        <input
+          value={path()}
+          onInput={(v) => {
+            setPath(v);
+            setCandidates([]);
+          }}
+          placeholder="/absolute/path"
+          focused
+        />
+        <Show when={candidates().length > 0}>
+          <box flexDirection="column" paddingTop={1}>
+            <For each={candidates().slice(0, 8)}>
+              {(c) => <text fg={theme.textMuted} wrapMode="none">{c}</text>}
+            </For>
+          </box>
+        </Show>
+        <box flexDirection="row" paddingTop={1}>
+          {hint("tab", "complete")}
+          {hint("enter", "confirm")}
+          {hint("esc", "cancel")}
+        </box>
+      </box>
+    ),
+    unregister,
+  );
+  unregisterLayer = api.keymap.registerLayer({
+    commands: [
+      { name: "session_surf.chdir.complete", title: "Complete path", run: complete },
+      { name: "session_surf.chdir.confirm", title: "Confirm directory", run: confirm },
+      { name: "session_surf.chdir.close", title: "Cancel", run: close },
+    ],
+    bindings: [
+      { key: "tab", cmd: "session_surf.chdir.complete", desc: "Complete" },
+      { key: "enter", cmd: "session_surf.chdir.confirm", desc: "Confirm" },
+      { key: "esc", cmd: "session_surf.chdir.close", desc: "Cancel" },
+    ],
+  });
+}
+
+// Shell-style tab completion for a path fragment: expand a leading ~, list the
+// directory containing the last segment, and return the longest common prefix
+// of the matches (a trailing / marks a directory) plus the full match list for
+// display. Returns the input unchanged when nothing matches. Exported for
+// testing.
+export function completePath(input: string): { value: string; candidates: string[] } {
+  const t = input.trim();
+  if (!t) return { value: "", candidates: [] };
+  const expanded = t === "~" ? homedir() : t.startsWith("~/") ? join(homedir(), t.slice(1)) : t;
+  const slash = expanded.lastIndexOf("/");
+  const base = slash <= 0 ? (expanded.startsWith("/") ? "/" : "") : expanded.slice(0, slash + 1);
+  const partial = slash <= 0 && !expanded.startsWith("/") ? expanded : expanded.slice(slash + 1);
+  let entries: string[];
+  try {
+    entries = readdirSync(base || ".");
+  } catch {
+    return { value: input, candidates: [] };
+  }
+  const matches = entries.filter((e) => e.startsWith(partial)).sort();
+  if (matches.length === 0) return { value: input, candidates: [] };
+  const withSlash = (m: string) => {
+    try {
+      return base + m + (statSync((base || ".") + "/" + m).isDirectory() ? "/" : "");
+    } catch {
+      return base + m;
+    }
+  };
+  if (matches.length === 1) {
+    const value = withSlash(matches[0]);
+    return { value, candidates: [value] };
+  }
+  let prefix = matches[0];
+  for (let i = 1; i < matches.length; i++) {
+    let j = 0;
+    while (j < prefix.length && prefix[j] === matches[i][j]) j++;
+    prefix = prefix.slice(0, j);
+  }
+  return { value: base + prefix, candidates: matches.map(withSlash) };
 }
 
 // Scroll offset (in rows) that keeps the selected row centered: it stays put
@@ -824,6 +1154,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         { name: "session_surf.picker.rename", title: "Rename session", run: doRename },
         { name: "session_surf.picker.delete", title: "Delete session", run: doDelete },
         { name: "session_surf.picker.fork", title: "Fork session", run: doFork },
+        { name: "session_surf.picker.new", title: "New session", run: doNew },
         { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => wrapIndex(i, -1, filtered().length)) },
         { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => wrapIndex(i, 1, filtered().length)) },
         { name: "session_surf.picker.close", title: "Close picker", run: close },
@@ -833,6 +1164,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         { key: "ctrl+r", cmd: "session_surf.picker.rename", desc: "Rename" },
         { key: "ctrl+d", cmd: "session_surf.picker.delete", desc: "Delete" },
         { key: "ctrl+f", cmd: "session_surf.picker.fork", desc: "Fork" },
+        { key: "ctrl+n", cmd: "session_surf.picker.new", desc: "New" },
         { key: "up", cmd: "session_surf.picker.up", desc: "Up" },
         { key: "ctrl+k", cmd: "session_surf.picker.up", desc: "Up" },
         { key: "down", cmd: "session_surf.picker.down", desc: "Down" },
@@ -843,6 +1175,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
           "session_surf.picker.rename",
           "session_surf.picker.delete",
           "session_surf.picker.fork",
+          "session_surf.picker.new",
           "session_surf.picker.up",
           "session_surf.picker.down",
           "session_surf.picker.close",
@@ -855,6 +1188,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
       "session_surf.picker.rename": "ctrl+r",
       "session_surf.picker.delete": "ctrl+d",
       "session_surf.picker.fork": "ctrl+f",
+      "session_surf.picker.new": "ctrl+n",
       "session_surf.picker.close": "esc",
     };
     const overrides = api.tuiConfig.keybinds.gather("session_surf", [
@@ -862,6 +1196,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
       "session_surf.picker.rename",
       "session_surf.picker.delete",
       "session_surf.picker.fork",
+      "session_surf.picker.new",
       "session_surf.picker.close",
     ]);
     const hintKey = (cmd: string) => {
@@ -921,6 +1256,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
           />
         </Show>
         <box flexDirection="row" paddingTop={1}>
+          {hint("session_surf.picker.new", "new")}
           {hint("session_surf.picker.rename", "rename")}
           {hint("session_surf.picker.delete", "delete")}
           {hint("session_surf.picker.fork", "fork")}
@@ -979,6 +1315,22 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         onCancel={() => queueMicrotask(show)}
       />
     ));
+  }
+
+  function doNew(): void {
+    close();
+    void (async () => {
+      try {
+        const created = await api.client.session.create({});
+        if (!created.data) {
+          api.ui.toast({ variant: "error", message: "Session create failed" });
+          return;
+        }
+        api.route.navigate("session", { sessionID: created.data.id });
+      } catch {
+        api.ui.toast({ variant: "error", message: "Session create failed" });
+      }
+    })();
   }
 
   function doFork(): void {
@@ -1083,15 +1435,26 @@ const plugin: TuiPluginModule = {
             navigateRelative(api, -1);
           },
         },
+        {
+          name: "session_surf.chdir",
+          title: "Fork session in directory",
+          category: "Session",
+          namespace: "palette",
+          run() {
+            changeDirectory(api);
+          },
+        },
       ],
       bindings: [
         { key: "ctrl+o", cmd: "session_surf.picker.open", desc: "Open session picker" },
         { key: "ctrl+xj", cmd: "session_surf.next", desc: "Next session" },
         { key: "ctrl+xk", cmd: "session_surf.previous", desc: "Previous session" },
+        { key: "ctrl+xw", cmd: "session_surf.chdir", desc: "Fork in directory" },
         ...api.tuiConfig.keybinds.gather("session_surf", [
           "session_surf.picker.open",
           "session_surf.next",
           "session_surf.previous",
+          "session_surf.chdir",
         ]),
       ],
     });

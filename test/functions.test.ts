@@ -1,6 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import stringWidth from "string-width";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   MARKERS,
   PRESETS,
@@ -20,6 +23,13 @@ import {
   sessionTitle,
   shortDir,
   forkTitle,
+  expandPath,
+  completePath,
+  newId,
+  remapIds,
+  forkSessionRows,
+  bySessionTitle,
+  rowForeground,
 } from "../index.tsx";
 
 describe("centerScrollTop", () => {
@@ -384,5 +394,246 @@ describe("forkTitle", () => {
   test("ignores unrelated sessions with a similar prefix", () => {
     const s = [t("orig", "surfer"), t("other", "surfboard")];
     expect(forkTitle("surfer", s)).toBe("surfer");
+  });
+});
+
+describe("expandPath", () => {
+  test("empty and whitespace-only input return an empty string", () => {
+    expect(expandPath("")).toBe("");
+    expect(expandPath("   ")).toBe("");
+  });
+  test("relative paths resolve against the cwd", () => {
+    expect(expandPath("src/ui")).toBe(resolve("src/ui"));
+  });
+  test("absolute paths pass through", () => {
+    expect(expandPath("/tmp/x")).toBe("/tmp/x");
+  });
+  test("a leading ~ expands to the home directory", () => {
+    expect(expandPath("~/code")).toBe(join(homedir(), "code"));
+  });
+  test("~user paths are not windowed to the current user", () => {
+    expect(expandPath("~other/code")).toBe(resolve("~other/code"));
+  });
+});
+
+describe("completePath", () => {
+  const dir = mkdtempSync(join(tmpdir(), "surf-complete-"));
+  const src = join(dir, "src");
+  mkdirSync(src);
+  writeFileSync(join(src, "main.ts"), "");
+  writeFileSync(join(src, "lib.ts"), "");
+  writeFileSync(join(src, "common-a.ts"), "");
+  writeFileSync(join(src, "common-b.ts"), "");
+  writeFileSync(join(dir, "app.ts"), "");
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  test("empty input stays empty", () => {
+    expect(completePath("")).toEqual({ value: "", candidates: [] });
+  });
+  test("no match returns the input unchanged", () => {
+    const input = join(dir, "zzz");
+    expect(completePath(input)).toEqual({ value: input, candidates: [] });
+  });
+  test("a unique directory match completes with a trailing slash", () => {
+    expect(completePath(join(dir, "sr"))).toEqual({ value: join(dir, "src") + "/", candidates: [join(dir, "src") + "/"] });
+  });
+  test("a unique file match completes without a slash", () => {
+    expect(completePath(join(src, "ma"))).toEqual({ value: join(src, "main.ts"), candidates: [join(src, "main.ts")] });
+  });
+  test("a trailing slash lists the directory", () => {
+    const c = completePath(join(src, "/"));
+    expect(c.candidates.sort()).toEqual(
+      [join(src, "lib.ts"), join(src, "main.ts"), join(src, "common-a.ts"), join(src, "common-b.ts")].sort(),
+    );
+    expect(c.value).toBe(join(src, "/"));
+  });
+  test("ambiguous matches return the longest common prefix", () => {
+    const c = completePath(join(src, "com"));
+    expect(c.value).toBe(join(src, "common-"));
+    expect(c.candidates.sort()).toEqual([join(src, "common-a.ts"), join(src, "common-b.ts")].sort());
+  });
+});
+
+describe("newId", () => {
+  test("prefixes the id and generates a 24-char body", () => {
+    expect(newId("ses_")).toMatch(/^ses_[a-z0-9]{24}$/);
+    expect(newId("msg_")).toMatch(/^msg_[a-z0-9]{24}$/);
+  });
+  test("generates distinct ids", () => {
+    expect(newId("ses_")).not.toBe(newId("ses_"));
+  });
+});
+
+describe("remapIds", () => {
+  const map = new Map([
+    ["old-a", "new-a"],
+    ["old-b", "new-b"],
+  ]);
+  test("rewrites matching strings and passes others through", () => {
+    expect(remapIds("old-a", map)).toBe("new-a");
+    expect(remapIds("unrelated", map)).toBe("unrelated");
+  });
+  test("rewrites values at any nesting depth including arrays", () => {
+    expect(remapIds({ parentID: "old-a", list: [{ id: "old-b" }], role: "user" }, map)).toEqual({
+      parentID: "new-a",
+      list: [{ id: "new-b" }],
+      role: "user",
+    });
+  });
+  test("rewrites object keys too", () => {
+    expect(remapIds({ "old-a": "old-b" }, map)).toEqual({ "new-a": "new-b" });
+  });
+  test("leaves primitives alone", () => {
+    expect(remapIds(42, map)).toBe(42);
+    expect(remapIds(null, map)).toBe(null);
+  });
+});
+
+describe("forkSessionRows", () => {
+  const src = {
+    id: "ses_source",
+    slug: "green-falcon",
+    directory: "/from",
+    path: "",
+    parent_id: null,
+    project_id: "proj-1",
+    title: "Original",
+    version: 1,
+    time_created: 1000,
+    time_updated: 2000,
+  };
+  const messages = [
+    {
+      id: "msg_a",
+      time_created: 1000,
+      time_updated: 1005,
+      data: JSON.stringify({ role: "user", parentID: null, sessionID: "ses_source" }),
+    },
+    {
+      id: "msg_b",
+      time_created: 1010,
+      time_updated: 1020,
+      data: JSON.stringify({ role: "assistant", parentID: "msg_a", sessionID: "ses_source" }),
+    },
+  ];
+  const parts = [
+    {
+      id: "part_a1",
+      message_id: "msg_a",
+      session_id: "ses_source",
+      time_created: 1001,
+      time_updated: 1002,
+      data: JSON.stringify({ type: "text", text: "hi", continuation: { partID: "part_a2" } }),
+    },
+    {
+      id: "part_a2",
+      message_id: "msg_a",
+      session_id: "ses_source",
+      time_created: 1002,
+      time_updated: 1003,
+      data: JSON.stringify({ type: "text-delta", delta: "x" }),
+    },
+  ];
+  const target = { id: "ses_new", slug: "green-falcon-abc123", directory: "/to", title: "Original (fork)", sourceId: "ses_source" };
+  const forked = forkSessionRows(src, messages, parts, target);
+
+  test("the session row is copied with the target identity and directory", () => {
+    expect(forked.session.id).toBe("ses_new");
+    expect(forked.session.slug).toBe("green-falcon-abc123");
+    expect(forked.session.directory).toBe("/to");
+    expect(forked.session.path).toBe("");
+    expect(forked.session.parent_id).toBe(null);
+    expect(forked.session.title).toBe("Original (fork)");
+    expect(forked.session.project_id).toBe("proj-1"); // untouched columns survive
+    expect(forked.session.version).toBe(1);
+    expect(forked.session.time_created).toBeGreaterThan(2000);
+  });
+
+  test("messages get fresh ids, the new session id, and rewired JSON", () => {
+    expect(forked.messages).toHaveLength(2);
+    const [a, b] = forked.messages;
+    expect(a.id).toMatch(/^msg_[a-z0-9]{24}$/);
+    expect(a.id).not.toBe("msg_a");
+    expect(b.id).not.toBe(a.id);
+    expect(a.session_id).toBe("ses_new");
+    expect(b.session_id).toBe("ses_new");
+    expect(JSON.parse(a.data)).toEqual({ role: "user", parentID: null, sessionID: "ses_new" });
+    expect(JSON.parse(b.data).parentID).toBe(a.id); // parent chain points into the copy
+    expect(JSON.parse(b.data).sessionID).toBe("ses_new");
+    expect(a.time_created).toBe(1000); // conversation history is preserved
+    expect(b.time_updated).toBe(1020);
+  });
+
+  test("parts are remapped to the new message and rewired", () => {
+    expect(forked.parts).toHaveLength(2);
+    const [p1, p2] = forked.parts;
+    expect(p1.id).toMatch(/^part_[a-z0-9]{24}$/);
+    expect(p1.message_id).toBe(forked.messages[0].id);
+    expect(p1.session_id).toBe("ses_new");
+    expect(JSON.parse(p1.data).continuation.partID).toBe(p2.id);
+  });
+
+  test("malformed message JSON is carried over untouched", () => {
+    const out = forkSessionRows(src, [{ id: "msg_x", time_created: 1, time_updated: 2, data: "not-json" }], [], target);
+    expect(out.messages[0].data).toBe("not-json");
+    expect(out.messages[0].id).not.toBe("msg_x");
+  });
+});
+
+describe("bySessionTitle", () => {
+  const s = (id: string, title: string, dir: string) => ({
+    id,
+    projectID: "p",
+    directory: dir,
+    title,
+    time: { created: 0, updated: 0 },
+  });
+  test("orders by displayed name, ignoring case", () => {
+    const list = [s("c", "zeta", "/x"), s("a", "Alpha", "/x"), s("b", "beta", "/x")];
+    expect([...list].sort(bySessionTitle).map((x) => x.id)).toEqual(["a", "b", "c"]);
+  });
+  test("names are stable when recency changes", () => {
+    const fresh = (id: string, title: string, updated: number) => ({
+      id,
+      projectID: "p",
+      directory: "/x",
+      title,
+      time: { created: 0, updated },
+    });
+    const older = [fresh("a", "Alpha", 100), fresh("b", "Beta", 200)];
+    const newer = [fresh("a", "Alpha", 300), fresh("b", "Beta", 200)];
+    expect([...older].sort(bySessionTitle).map((x) => x.id)).toEqual([...newer].sort(bySessionTitle).map((x) => x.id));
+  });
+  test("same name falls back to id order", () => {
+    const list = [s("zz", "Same", "/x"), s("aa", "same", "/x")];
+    expect([...list].sort(bySessionTitle).map((x) => x.id)).toEqual(["aa", "zz"]);
+  });
+  test("empty display names fall back to the directory basename", () => {
+    const list = [s("a", "", "/work/zzz"), s("b", "", "/work/aaa")];
+    expect([...list].sort(bySessionTitle).map((x) => x.id)).toEqual(["b", "a"]);
+  });
+});
+
+describe("rowForeground", () => {
+  const theme = {
+    text: "text",
+    textMuted: "muted",
+    accent: "purple",
+    info: "cyan",
+    primary: "orange",
+    success: "green",
+  };
+  test("focused session is always orange, even when working or asking", () => {
+    expect(rowForeground({ waiting: false, working: true, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: true, working: false, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
+  });
+  test("other sessions keep their state colors", () => {
+    expect(rowForeground({ waiting: true, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("purple");
+    expect(rowForeground({ waiting: false, working: true, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("cyan");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: true, inActive: true }, theme)).toBe("green");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("green");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: false }, theme)).toBe("text");
   });
 });

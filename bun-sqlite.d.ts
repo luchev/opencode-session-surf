@@ -2,14 +2,18 @@ declare module "bun:sqlite" {
   export interface DatabaseOptions {
     readonly?: boolean;
     create?: boolean;
+    readwrite?: boolean;
   }
   export class Database {
     constructor(path: string, options?: DatabaseOptions);
     query(sql: string): Statement;
+    exec(sql: string): void;
     close(): void;
   }
   export class Statement {
     all(...params: unknown[]): Record<string, unknown>[];
+    get(...params: unknown[]): Record<string, unknown> | null;
+    run(...params: unknown[]): void;
   }
 }
 
