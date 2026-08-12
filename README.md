@@ -12,7 +12,15 @@ synced across opencode instances, plus quick session switching.
   statuses (busy/waiting) to a temp-dir status file; other instances pick them
   up so you can see when a session is active elsewhere
 - **Ctrl+O fuzzy picker** — fuzzy-search sessions by title or directory and
-  switch instantly; close matches are ordered by recency, most recent on top
+  switch instantly; close matches are ordered by recency, most recent on top.
+  Arrow keys or `ctrl+j`/`ctrl+k` move the highlight (wrapping at both ends),
+  which stays centred as the list scrolls; long names are truncated with `…`
+- **Rename / delete / fork from the picker** — act on the highlighted session
+  without leaving the popup (rename applies instantly)
+- **Compact or comfortable rows** — one line, or two lines per session, via the
+  `density` option
+- **Configurable look** — spinner, waiting indicator, and marker glyph styles,
+  or a whole `preset`; all keybinds are rebindable
 - **Next/previous session** commands for quick navigation
 
 ## Install
@@ -65,8 +73,8 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 
 | Option | Values | Default | Description |
 |---|---|---|---|---|
-| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `gauge`, `speed`, `""` | `dots` | Working spinner style; `""` hides it |
-| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `bounce`, `eyeblink`, `bell`, `help`, `bulb`, `ghost`, `""` | `pulse` | Waiting-for-input indicator; `""` hides it |
+| `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `gauge`, `speed`, `none`, `""` | `dots` | Working spinner style; `none` renders a blank cell, `""` hides it |
+| `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `bounce`, `eyeblink`, `bell`, `help`, `bulb`, `ghost`, `none`, `""` | `pulse` | Waiting-for-input indicator; `none` renders a blank cell, `""` hides it |
 | `marker` | `dot`, `square`, `arrow`, `star`, `none`, `caret`, `ping`, `creation`, `sprout` | `dot` | Active-session marker glyph |
 | `preset` | `ping`, `term`, `braille`, `hex`, `moon`, `pie` | — | Predefined look that overrides `spinner`/`waiting`/`marker` (see below) |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
@@ -131,16 +139,20 @@ The picker itself has its own actions, also configurable through the same
 | Picker action | Default | Command |
 |---|---|---|
 | Switch to selected session | `enter` | `session_surf.picker.switch` |
+| Move selection up | `↑`, `ctrl+k` | `session_surf.picker.up` |
+| Move selection down | `↓`, `ctrl+j` | `session_surf.picker.down` |
 | Rename selected session | `ctrl+r` | `session_surf.picker.rename` |
 | Delete selected session | `ctrl+d` | `session_surf.picker.delete` |
 | Fork selected session | `ctrl+f` | `session_surf.picker.fork` |
 | Close the picker | `esc` | `session_surf.picker.close` |
 
-Rename and delete keep the picker open (a confirmation prompt appears first);
-fork closes it and switches to the new session, which keeps the original name
-the first time and gets a numbered suffix afterwards (`name (fork 2)`,
-`name (fork 3)`, …). Plain letter keys always stay free for search — only the
-control/arrow/enter/esc bindings above are captured while the picker is open.
+Selection wraps around both ends. Rename and delete keep the picker open (a
+confirmation prompt appears first, and rename shows the new title
+immediately); fork closes it and switches to the new session, which keeps the
+original name the first time and gets a numbered suffix afterwards
+(`name (fork 2)`, `name (fork 3)`, …). Plain letter keys always stay free for
+search — only the control/arrow/enter/esc bindings above are captured while the
+picker is open.
 
 ```json
 {
@@ -172,7 +184,7 @@ The leader is opencode's own setting, not this plugin's. Change it in
 bun install
 bun run dev     # build watch → dist/index.js
 bun run build   # one-shot build
-bun test        # unit + render tests
+bun run test    # unit + render tests (uses the @opentui/solid preload)
 ```
 
 To test the plugin locally, point tui.json's `plugin` array at the local
