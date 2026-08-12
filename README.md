@@ -132,6 +132,7 @@ name (custom keybinds are additive to the defaults):
 | Open session picker | `ctrl+o` | `session_surf.picker.open` |
 | Next session | `ctrl+x j` | `session_surf.next` |
 | Previous session | `ctrl+x k` | `session_surf.previous` |
+| Fork session into a directory | `ctrl+x w` | `session_surf.chdir` |
 
 The picker itself has its own actions, also configurable through the same
 `keybinds` map and shown at the bottom of the popup:
@@ -144,6 +145,7 @@ The picker itself has its own actions, also configurable through the same
 | Rename selected session | `ctrl+r` | `session_surf.picker.rename` |
 | Delete selected session | `ctrl+d` | `session_surf.picker.delete` |
 | Fork selected session | `ctrl+f` | `session_surf.picker.fork` |
+| New session | `ctrl+n` | `session_surf.picker.new` |
 | Close the picker | `esc` | `session_surf.picker.close` |
 
 Selection wraps around both ends. Rename and delete keep the picker open (a
@@ -153,6 +155,13 @@ original name the first time and gets a numbered suffix afterwards
 (`name (fork 2)`, `name (fork 3)`, …). Plain letter keys always stay free for
 search — only the control/arrow/enter/esc bindings above are captured while the
 picker is open.
+
+`ctrl+x w` forks the current session into a directory you type or tab-complete:
+a new session with the conversation copied over, whose working directory is
+the one you chose. There is no opencode API that both sets a directory and
+copies the conversation, so the fork writes the session, message, and part
+rows directly into `~/.local/share/opencode/opencode.db` (same shape the
+server's own fork produces).
 
 ```json
 {
