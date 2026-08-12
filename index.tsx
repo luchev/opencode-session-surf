@@ -802,8 +802,8 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         { name: "session_surf.picker.rename", title: "Rename session", run: doRename },
         { name: "session_surf.picker.delete", title: "Delete session", run: doDelete },
         { name: "session_surf.picker.fork", title: "Fork session", run: doFork },
-        { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => Math.max(0, i - 1)) },
-        { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => Math.min(filtered().length - 1, i + 1)) },
+        { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => { const n = filtered().length; return n === 0 ? 0 : (i - 1 + n) % n; }) },
+        { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => { const n = filtered().length; return n === 0 ? 0 : (i + 1) % n; }) },
         { name: "session_surf.picker.close", title: "Close picker", run: close },
       ],
       bindings: [
@@ -812,7 +812,9 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
         { key: "ctrl+d", cmd: "session_surf.picker.delete", desc: "Delete" },
         { key: "ctrl+f", cmd: "session_surf.picker.fork", desc: "Fork" },
         { key: "up", cmd: "session_surf.picker.up", desc: "Up" },
+        { key: "ctrl+k", cmd: "session_surf.picker.up", desc: "Up" },
         { key: "down", cmd: "session_surf.picker.down", desc: "Down" },
+        { key: "ctrl+j", cmd: "session_surf.picker.down", desc: "Down" },
         { key: "esc", cmd: "session_surf.picker.close", desc: "Close" },
         ...api.tuiConfig.keybinds.gather("session_surf", [
           "session_surf.picker.switch",
