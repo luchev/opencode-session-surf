@@ -726,7 +726,13 @@ export function PickerList(props: {
       on(e: string, cb: () => void): void;
       off(e: string, cb: () => void): void;
     };
-    const update = () => setMeasured(el.width);
+    // Defer the signal update out of opentui's native "resized" callback:
+    // setting a signal synchronously there re-renders mid-layout and can crash
+    // the native renderer. queueMicrotask lets the layout pass finish first.
+    const update = () => {
+      const width = el.width;
+      queueMicrotask(() => setMeasured((prev) => (prev === width ? prev : width)));
+    };
     update();
     ev.on("resized", update);
     onCleanup(() => ev.off("resized", update));
