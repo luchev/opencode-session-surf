@@ -1463,9 +1463,9 @@ const plugin: TuiPluginModule = {
     // Picker row layout: "compact" (one line) or "comfortable" (two lines).
     const density: PickerDensity = options?.density === "compact" ? "compact" : "comfortable";
     // Subagent display: "collapsed" hides children but folds their busy state
-    // into the parent; "tree" also renders an indented row per child with its
-    // own status.
-    const subagents: "collapsed" | "tree" = options?.subagents === "tree" ? "tree" : "collapsed";
+    // into the parent; "tree" (default) also renders an indented row per child
+    // with its own status.
+    const subagents: "collapsed" | "tree" = options?.subagents === "collapsed" ? "collapsed" : "tree";
     api.slots.register({
       order: 300,
       slots: {

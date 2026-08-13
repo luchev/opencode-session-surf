@@ -80,7 +80,7 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
 | `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
 | `density` | `compact`, `comfortable` | `comfortable` | Session manager picker row layout: `compact` puts name + age + dir on one line; `comfortable` uses two lines (name, then age left / dir right) |
-| `subagents` | `collapsed`, `tree` | `collapsed` | Subagent display (see below) |
+| `subagents` | `collapsed`, `tree` | `tree` | Subagent display (see below) |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
 Some symbols (`battery`, `gauge`, `speed`, `eyeblink`, `bell`, `help`, `bulb`,
@@ -94,14 +94,14 @@ sections, each collapsible on click via the `▼`/`▶` toggle:
 
 Subagent display is controlled by `subagents`:
 
-- **`collapsed`** (default) — subagent sessions are hidden, but a session that
-  spawned subagents stays busy while any of them (or their sub-subagents) is
-  still running, so it never looks done mid-flight.
-- **`tree`** — each session also lists its subagents as indented rows with
+- **`tree`** (default) — each session also lists its subagents as indented rows with
   their own status spinner (waiting/working) and title; subagent rows have no
   time or directory and are clickable to open the subagent session. Busy state
   still folds up the tree, so a parent whose grandchild subagent is running
   shows busy too.
+- **`collapsed`** — subagent sessions are hidden, but a session that
+  spawned subagents stays busy while any of them (or their sub-subagents) is
+  still running, so it never looks done mid-flight.
 
 - **`preset: "ping"`** — a predefined look that ignores the individual
   `spinner`/`waiting`/`marker` options: the current session shows `◉` (ping),
