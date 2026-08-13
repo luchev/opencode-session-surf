@@ -79,7 +79,7 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 | `preset` | `ping`, `term`, `braille`, `hex`, `moon`, `pie` | — | Predefined look that overrides `spinner`/`waiting`/`marker` (see below) |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
 | `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
-| `density` | `compact`, `comfortable` | `comfortable` | Switch-session picker row layout: `compact` puts name + age + dir on one line; `comfortable` uses two lines (name, then age left / dir right) |
+| `density` | `compact`, `comfortable` | `comfortable` | Session manager picker row layout: `compact` puts name + age + dir on one line; `comfortable` uses two lines (name, then age left / dir right) |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
 Some symbols (`battery`, `gauge`, `speed`, `eyeblink`, `bell`, `help`, `bulb`,
@@ -145,6 +145,7 @@ The picker itself has its own actions, also configurable through the same
 | Rename selected session | `ctrl+r` | `session_surf.picker.rename` |
 | Delete selected session | `ctrl+d` | `session_surf.picker.delete` |
 | Fork selected session | `ctrl+f` | `session_surf.picker.fork` |
+| Move selected session | `ctrl+w` | `session_surf.picker.move` |
 | New session | `ctrl+n` | `session_surf.picker.new` |
 | Close the picker | `esc` | `session_surf.picker.close` |
 
@@ -152,7 +153,8 @@ Selection wraps around both ends. Rename and delete keep the picker open (a
 confirmation prompt appears first, and rename shows the new title
 immediately); fork closes it and switches to the new session, which keeps the
 original name the first time and gets a numbered suffix afterwards
-(`name (fork 2)`, `name (fork 3)`, …). Plain letter keys always stay free for
+(`name (fork 2)`, `name (fork 3)`, …); move closes it and prompts for a
+directory, exactly like `ctrl+x w`. Plain letter keys always stay free for
 search — only the control/arrow/enter/esc bindings above are captured while the
 picker is open.
 

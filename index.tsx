@@ -721,17 +721,25 @@ export function setSessionDirectory(sessionId: string, directory: string, db?: D
   }
 }
 
-// Leader-chord global action (ctrl+x w): prompt for a new working directory
-// and fork the current session into it — a new session, full conversation
-// copied, pointing at the chosen directory. A custom dialog (like the picker)
-// so Tab can shell-complete paths; enter confirms, esc cancels. Success lands
-// in the forked session.
+// Leader-chord global action (ctrl+x w): prompt for a new working directory and
+// move the current session into it (see moveSessionDialog). No active session
+// falls back to the dialog id-less guard.
 function changeDirectory(api: TuiPluginApi): void {
   const id = currentSessionID(api);
   if (!id) {
     api.ui.toast({ variant: "warning", message: "No active session" });
     return;
   }
+  moveSessionDialog(api, id);
+}
+
+// Move a session into a chosen directory: fork it through the server API (which
+// copies the full conversation), retarget the new row's directory in the DB,
+// restore the original title, delete the original, and land in the moved
+// session. A custom dialog (like the picker) so Tab can shell-complete paths;
+// enter confirms, esc cancels. Shared by the ctrl+x w command (current session)
+// and the picker's move action (highlighted session).
+function moveSessionDialog(api: TuiPluginApi, id: string): void {
   const theme = api.theme.current;
   const me = dbSessions().find((s) => s.id === id);
   const [path, setPath] = createSignal(me?.directory ?? "");
@@ -1066,10 +1074,11 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     unregister();
     const layer = {
       commands: [
-        { name: "session_surf.picker.switch", title: "Switch session", run: () => { const s = selected(); if (s) switchTo(s); } },
+        { name: "session_surf.picker.switch", title: "Session Manager", run: () => { const s = selected(); if (s) switchTo(s); } },
         { name: "session_surf.picker.rename", title: "Rename session", run: doRename },
         { name: "session_surf.picker.delete", title: "Delete session", run: doDelete },
         { name: "session_surf.picker.fork", title: "Fork session", run: doFork },
+        { name: "session_surf.picker.move", title: "Move session", run: doMove },
         { name: "session_surf.picker.new", title: "New session", run: doNew },
         { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => wrapIndex(i, -1, filtered().length)) },
         { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => wrapIndex(i, 1, filtered().length)) },
@@ -1080,6 +1089,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
         { key: "ctrl+r", cmd: "session_surf.picker.rename", desc: "Rename" },
         { key: "ctrl+d", cmd: "session_surf.picker.delete", desc: "Delete" },
         { key: "ctrl+f", cmd: "session_surf.picker.fork", desc: "Fork" },
+        { key: "ctrl+w", cmd: "session_surf.picker.move", desc: "Move" },
         { key: "ctrl+n", cmd: "session_surf.picker.new", desc: "New" },
         { key: "up", cmd: "session_surf.picker.up", desc: "Up" },
         { key: "ctrl+k", cmd: "session_surf.picker.up", desc: "Up" },
@@ -1091,6 +1101,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
           "session_surf.picker.rename",
           "session_surf.picker.delete",
           "session_surf.picker.fork",
+          "session_surf.picker.move",
           "session_surf.picker.new",
           "session_surf.picker.up",
           "session_surf.picker.down",
@@ -1104,6 +1115,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
       "session_surf.picker.rename": "ctrl+r",
       "session_surf.picker.delete": "ctrl+d",
       "session_surf.picker.fork": "ctrl+f",
+      "session_surf.picker.move": "ctrl+w",
       "session_surf.picker.new": "ctrl+n",
       "session_surf.picker.close": "esc",
     };
@@ -1112,6 +1124,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
       "session_surf.picker.rename",
       "session_surf.picker.delete",
       "session_surf.picker.fork",
+      "session_surf.picker.move",
       "session_surf.picker.new",
       "session_surf.picker.close",
     ]);
@@ -1155,6 +1168,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     // Hint bar: merged key+label hints ("ctrl+new") when the key letter is in
     // the word, spaced otherwise; spill to a second row when they don't fit.
     const pickerHints = [
+      { cmd: "session_surf.picker.move", label: "move" },
       { cmd: "session_surf.picker.new", label: "new" },
       { cmd: "session_surf.picker.rename", label: "rename" },
       { cmd: "session_surf.picker.delete", label: "delete" },
@@ -1176,7 +1190,7 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     api.ui.dialog.replace(() => (
       <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
         <box flexDirection="row" justifyContent="space-between">
-          <text fg={theme.text}><b>Switch Session</b></text>
+          <text fg={theme.text}><b>Session Manager</b></text>
           <text fg={theme.textMuted}>esc</text>
         </box>
         <box height={1} />
@@ -1306,6 +1320,13 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     })();
   }
 
+  function doMove(): void {
+    const s = selected();
+    if (!s) return;
+    close();
+    moveSessionDialog(api, s.id);
+  }
+
   show();
 }
 
@@ -1355,7 +1376,7 @@ const plugin: TuiPluginModule = {
       commands: [
         {
           name: "session_surf.picker.open",
-          title: "Switch session",
+          title: "Session Manager",
           category: "Session",
           namespace: "palette",
           run() {
