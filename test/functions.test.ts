@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import stringWidth from "string-width";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -25,9 +26,8 @@ import {
   forkTitle,
   expandPath,
   completePath,
-  newId,
-  remapIds,
-  forkSessionRows,
+  setSessionDirectory,
+  splitKeybind,
   bySessionTitle,
   rowForeground,
 } from "../index.tsx";
@@ -455,129 +455,29 @@ describe("completePath", () => {
   });
 });
 
-describe("newId", () => {
-  test("prefixes the id and generates a 24-char body", () => {
-    expect(newId("ses_")).toMatch(/^ses_[a-z0-9]{24}$/);
-    expect(newId("msg_")).toMatch(/^msg_[a-z0-9]{24}$/);
+describe("splitKeybind", () => {
+  test("letter at word start merges the rest as suffix", () => {
+    expect(splitKeybind("ctrl+n", "new")).toEqual({ key: "ctrl+n", suffix: "ew" });
+    expect(splitKeybind("ctrl+r", "rename")).toEqual({ key: "ctrl+r", suffix: "ename" });
+    expect(splitKeybind("ctrl+f", "fork")).toEqual({ key: "ctrl+f", suffix: "ork" });
+    expect(splitKeybind("ctrl+d", "delete")).toEqual({ key: "ctrl+d", suffix: "elete" });
   });
-  test("generates distinct ids", () => {
-    expect(newId("ses_")).not.toBe(newId("ses_"));
+  test("a mid-word letter merges from its first occurrence", () => {
+    expect(splitKeybind("ctrl+e", "delete")).toEqual({ key: "ctrl+e", suffix: "lete" });
   });
-});
-
-describe("remapIds", () => {
-  const map = new Map([
-    ["old-a", "new-a"],
-    ["old-b", "new-b"],
-  ]);
-  test("rewrites matching strings and passes others through", () => {
-    expect(remapIds("old-a", map)).toBe("new-a");
-    expect(remapIds("unrelated", map)).toBe("unrelated");
+  test("keys without a plus keep the spaced form", () => {
+    expect(splitKeybind("enter", "switch")).toEqual({ key: "enter", suffix: null });
+    expect(splitKeybind("esc", "close")).toEqual({ key: "esc", suffix: null });
   });
-  test("rewrites values at any nesting depth including arrays", () => {
-    expect(remapIds({ parentID: "old-a", list: [{ id: "old-b" }], role: "user" }, map)).toEqual({
-      parentID: "new-a",
-      list: [{ id: "new-b" }],
-      role: "user",
-    });
+  test("chord keys keep the spaced form", () => {
+    expect(splitKeybind("ctrl+xj", "next")).toEqual({ key: "ctrl+xj", suffix: null });
   });
-  test("rewrites object keys too", () => {
-    expect(remapIds({ "old-a": "old-b" }, map)).toEqual({ "new-a": "new-b" });
+  test("a letter absent from the label keeps the spaced form", () => {
+    expect(splitKeybind("ctrl+k", "up")).toEqual({ key: "ctrl+k", suffix: null });
+    expect(splitKeybind("ctrl+j", "down")).toEqual({ key: "ctrl+j", suffix: null });
   });
-  test("leaves primitives alone", () => {
-    expect(remapIds(42, map)).toBe(42);
-    expect(remapIds(null, map)).toBe(null);
-  });
-});
-
-describe("forkSessionRows", () => {
-  const src = {
-    id: "ses_source",
-    slug: "green-falcon",
-    directory: "/from",
-    path: "",
-    parent_id: null,
-    project_id: "proj-1",
-    title: "Original",
-    version: 1,
-    time_created: 1000,
-    time_updated: 2000,
-  };
-  const messages = [
-    {
-      id: "msg_a",
-      time_created: 1000,
-      time_updated: 1005,
-      data: JSON.stringify({ role: "user", parentID: null, sessionID: "ses_source" }),
-    },
-    {
-      id: "msg_b",
-      time_created: 1010,
-      time_updated: 1020,
-      data: JSON.stringify({ role: "assistant", parentID: "msg_a", sessionID: "ses_source" }),
-    },
-  ];
-  const parts = [
-    {
-      id: "part_a1",
-      message_id: "msg_a",
-      session_id: "ses_source",
-      time_created: 1001,
-      time_updated: 1002,
-      data: JSON.stringify({ type: "text", text: "hi", continuation: { partID: "part_a2" } }),
-    },
-    {
-      id: "part_a2",
-      message_id: "msg_a",
-      session_id: "ses_source",
-      time_created: 1002,
-      time_updated: 1003,
-      data: JSON.stringify({ type: "text-delta", delta: "x" }),
-    },
-  ];
-  const target = { id: "ses_new", slug: "green-falcon-abc123", directory: "/to", title: "Original (fork)", sourceId: "ses_source" };
-  const forked = forkSessionRows(src, messages, parts, target);
-
-  test("the session row is copied with the target identity and directory", () => {
-    expect(forked.session.id).toBe("ses_new");
-    expect(forked.session.slug).toBe("green-falcon-abc123");
-    expect(forked.session.directory).toBe("/to");
-    expect(forked.session.path).toBe("");
-    expect(forked.session.parent_id).toBe(null);
-    expect(forked.session.title).toBe("Original (fork)");
-    expect(forked.session.project_id).toBe("proj-1"); // untouched columns survive
-    expect(forked.session.version).toBe(1);
-    expect(forked.session.time_created).toBeGreaterThan(2000);
-  });
-
-  test("messages get fresh ids, the new session id, and rewired JSON", () => {
-    expect(forked.messages).toHaveLength(2);
-    const [a, b] = forked.messages;
-    expect(a.id).toMatch(/^msg_[a-z0-9]{24}$/);
-    expect(a.id).not.toBe("msg_a");
-    expect(b.id).not.toBe(a.id);
-    expect(a.session_id).toBe("ses_new");
-    expect(b.session_id).toBe("ses_new");
-    expect(JSON.parse(a.data)).toEqual({ role: "user", parentID: null, sessionID: "ses_new" });
-    expect(JSON.parse(b.data).parentID).toBe(a.id); // parent chain points into the copy
-    expect(JSON.parse(b.data).sessionID).toBe("ses_new");
-    expect(a.time_created).toBe(1000); // conversation history is preserved
-    expect(b.time_updated).toBe(1020);
-  });
-
-  test("parts are remapped to the new message and rewired", () => {
-    expect(forked.parts).toHaveLength(2);
-    const [p1, p2] = forked.parts;
-    expect(p1.id).toMatch(/^part_[a-z0-9]{24}$/);
-    expect(p1.message_id).toBe(forked.messages[0].id);
-    expect(p1.session_id).toBe("ses_new");
-    expect(JSON.parse(p1.data).continuation.partID).toBe(p2.id);
-  });
-
-  test("malformed message JSON is carried over untouched", () => {
-    const out = forkSessionRows(src, [{ id: "msg_x", time_created: 1, time_updated: 2, data: "not-json" }], [], target);
-    expect(out.messages[0].data).toBe("not-json");
-    expect(out.messages[0].id).not.toBe("msg_x");
+  test("a bare plus at the end keeps the spaced form", () => {
+    expect(splitKeybind("ctrl+", "new")).toEqual({ key: "ctrl+", suffix: null });
   });
 });
 
@@ -635,5 +535,34 @@ describe("rowForeground", () => {
     expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: true, inActive: true }, theme)).toBe("green");
     expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("green");
     expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: false }, theme)).toBe("text");
+  });
+});
+
+describe("setSessionDirectory", () => {
+  const sessionTable = (db: Database) => {
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT)");
+    db.exec("INSERT INTO session (id, directory) VALUES ('ses_a', '/old/dir')");
+  };
+  test("updates the directory of an existing session row", () => {
+    const db = new Database(":memory:");
+    sessionTable(db);
+    const res = setSessionDirectory("ses_a", "/new/dir", db);
+    expect(res).toEqual({ ok: true });
+    const row = db.query("SELECT directory FROM session WHERE id = ?").get("ses_a") as { directory: string };
+    expect(row.directory).toBe("/new/dir");
+    db.close();
+  });
+  test("returns schema when the session table has no directory column", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY)");
+    db.exec("INSERT INTO session (id) VALUES ('ses_a')");
+    expect(setSessionDirectory("ses_a", "/new/dir", db)).toEqual({ ok: false, reason: "schema" });
+    db.close();
+  });
+  test("returns db when the update throws", () => {
+    const db = new Database(":memory:");
+    sessionTable(db);
+    db.close();
+    expect(setSessionDirectory("ses_a", "/new/dir", db)).toEqual({ ok: false, reason: "db" });
   });
 });

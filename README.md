@@ -79,7 +79,7 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 | `preset` | `ping`, `term`, `braille`, `hex`, `moon`, `pie` | — | Predefined look that overrides `spinner`/`waiting`/`marker` (see below) |
 | `pollMs` | number (ms) | `3000` | Sidebar refresh interval; values below 1000 are ignored |
 | `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
-| `density` | `compact`, `comfortable` | `compact` | Switch-session picker row layout: `compact` puts name + age + dir on one line; `comfortable` uses two lines (name, then age left / dir right) |
+| `density` | `compact`, `comfortable` | `comfortable` | Switch-session picker row layout: `compact` puts name + age + dir on one line; `comfortable` uses two lines (name, then age left / dir right) |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
 Some symbols (`battery`, `gauge`, `speed`, `eyeblink`, `bell`, `help`, `bulb`,
@@ -132,7 +132,7 @@ name (custom keybinds are additive to the defaults):
 | Open session picker | `ctrl+o` | `session_surf.picker.open` |
 | Next session | `ctrl+x j` | `session_surf.next` |
 | Previous session | `ctrl+x k` | `session_surf.previous` |
-| Fork session into a directory | `ctrl+x w` | `session_surf.chdir` |
+| Move session into a directory | `ctrl+x w` | `session_surf.chdir` |
 
 The picker itself has its own actions, also configurable through the same
 `keybinds` map and shown at the bottom of the popup:
@@ -156,12 +156,14 @@ original name the first time and gets a numbered suffix afterwards
 search — only the control/arrow/enter/esc bindings above are captured while the
 picker is open.
 
-`ctrl+x w` forks the current session into a directory you type or tab-complete:
-a new session with the conversation copied over, whose working directory is
-the one you chose. There is no opencode API that both sets a directory and
-copies the conversation, so the fork writes the session, message, and part
-rows directly into `~/.local/share/opencode/opencode.db` (same shape the
-server's own fork produces).
+`ctrl+x w` moves the current session into a directory you type or tab-complete:
+the conversation is forked into a new session whose working directory is the
+one you chose, the new session keeps the original name, and the original
+session is deleted. The server's fork API copies the conversation but cannot
+set a directory (fork/update/import all ignore it), so after forking the
+plugin writes the chosen directory straight into the new session's row in
+`~/.local/share/opencode/opencode.db` — the server re-reads it from the
+database on every request.
 
 ```json
 {

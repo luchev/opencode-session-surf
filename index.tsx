@@ -687,91 +687,7 @@ export function expandPath(input: string): string {
   return resolve(t);
 }
 
-// A random id with the given prefix, shaped like the server's own ids
-// ("ses_...", "msg_...", "part_...") so consumers treat them the same.
-export function newId(prefix: string): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let s = "";
-  for (let i = 0; i < 24; i++) s += chars[(Math.random() * chars.length) | 0];
-  return prefix + s;
-}
-
-// Recursively replace any string that appears as an id in `map` with its new
-// value — both values and keys, at any nesting depth. Used to rewire the
-// parent/child references inside copied message and part JSON after a fork.
-export function remapIds(value: unknown, map: Map<string, string>): unknown {
-  if (typeof value === "string") return map.get(value) ?? value;
-  if (Array.isArray(value)) return value.map((v) => remapIds(v, map));
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[map.get(k) ?? k] = remapIds(v, map);
-    return out;
-  }
-  return value;
-}
-
-function remapJson(raw: string, map: Map<string, string>): string {
-  try {
-    return JSON.stringify(remapIds(JSON.parse(raw), map));
-  } catch {
-    return raw; // malformed row: carry it over untouched rather than fail the fork
-  }
-}
-
-type SessionRow = Record<string, unknown>;
-type MessageRow = { id: string; time_created: number; time_updated: number; data: string };
-type PartRow = MessageRow & { message_id: string; session_id: string };
-
-// Duplicate a session for a fork: new session row (fresh id/slug, chosen
-// directory, null parent, titles/times overridden, every other column copied
-// verbatim so future schema columns survive), messages and parts copied with
-// fresh ids and their JSON rewired so references point inside the copy —
-// mirroring what the server's own fork does. Pure; the caller handles storage.
-export function forkSessionRows(
-  src: SessionRow,
-  messages: MessageRow[],
-  parts: PartRow[],
-  target: { id: string; slug: string; directory: string; title: string; sourceId: string },
-): {
-  session: SessionRow;
-  messages: (MessageRow & { session_id: string })[];
-  parts: PartRow[];
-} {
-  const session: SessionRow = {
-    ...src,
-    id: target.id,
-    slug: target.slug,
-    directory: target.directory,
-    path: "",
-    parent_id: null,
-    title: target.title,
-    time_created: Date.now(),
-    time_updated: Date.now(),
-  };
-  const msgMap = new Map<string, string>();
-  for (const m of messages) msgMap.set(m.id, newId("msg_"));
-  const partMap = new Map<string, string>();
-  for (const p of parts) partMap.set(p.id, newId("part_"));
-  const idMap = new Map<string, string>([...msgMap, ...partMap, [target.sourceId, target.id]]);
-  const newMessages: (MessageRow & { session_id: string })[] = messages.map((m) => ({
-    id: msgMap.get(m.id)!,
-    session_id: target.id,
-    time_created: m.time_created,
-    time_updated: m.time_updated,
-    data: remapJson(m.data, idMap),
-  }));
-  const newParts: PartRow[] = parts.map((p) => ({
-    id: partMap.get(p.id)!,
-    message_id: msgMap.get(p.message_id) ?? p.message_id,
-    session_id: target.id,
-    time_created: p.time_created,
-    time_updated: p.time_updated,
-    data: remapJson(p.data, idMap),
-  }));
-  return { session, messages: newMessages, parts: newParts };
-}
-
-type ForkResult = { ok: true; sessionId: string } | { ok: false; reason: "db" | "schema" | "missing" };
+type DirResult = { ok: true } | { ok: false; reason: "db" | "schema" };
 
 let dbw: Database | undefined;
 function getWriteDb(): Database | undefined {
@@ -785,52 +701,24 @@ function getWriteDb(): Database | undefined {
   }
 }
 
-function insert(db: Database, table: string, row: Record<string, unknown>): void {
-  const cols = Object.keys(row);
-  db.query(`INSERT INTO ${table} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(
-    ...cols.map((c) => row[c]),
-  );
-}
-
-// Fork the source session into `directory`, copying its full conversation.
-// There is no API that both sets a directory and copies the conversation
-// (update/fork/import all ignore directory or drop messages), so the copy
-// happens at the storage layer, mirroring the server's fork semantics.
-export function forkSessionToDirectory(sourceId: string, directory: string, title: string): ForkResult {
-  const db = getWriteDb();
-  if (!db) return { ok: false, reason: "db" };
-  const has = (t: string) =>
-    (db.query(`PRAGMA table_info(${t})`).all() as unknown[]).length > 0;
-  if (!has("session") || !has("message") || !has("part")) return { ok: false, reason: "schema" };
-  const src = db.query("SELECT * FROM session WHERE id = ?").get(sourceId) as SessionRow | null;
-  if (!src) return { ok: false, reason: "missing" };
-  const messages = db
-    .query("SELECT id, time_created, time_updated, data FROM message WHERE session_id = ? ORDER BY time_created")
-    .all(sourceId) as MessageRow[];
-  const parts = db
-    .query("SELECT id, message_id, session_id, time_created, time_updated, data FROM part WHERE session_id = ? ORDER BY time_created")
-    .all(sourceId) as PartRow[];
-  const slug = `${String(src.slug ?? "session")}-${newId("").slice(0, 6)}`;
-  const forked = forkSessionRows(src, messages, parts, {
-    id: newId("ses_"),
-    slug,
-    directory,
-    title,
-    sourceId,
-  });
+// Point an existing session's row at a new working directory. The server's
+// fork API copies the conversation but has no way to set the fork's directory
+// (fork/update/import all ignore it), so the directory is written straight
+// into opencode.db — a single row update, which the server re-reads per
+// request. Guarded against a missing `directory` column (schema drift).
+export function setSessionDirectory(sessionId: string, directory: string, db?: Database): DirResult {
+  const d = db ?? getWriteDb();
+  if (!d) return { ok: false, reason: "db" };
   try {
-    db.exec("BEGIN IMMEDIATE");
-    insert(db, "session", forked.session);
-    for (const m of forked.messages) insert(db, "message", m);
-    for (const p of forked.parts) insert(db, "part", p);
-    db.exec("COMMIT");
+    const cols = d.query("PRAGMA table_info(session)").all() as unknown[];
+    if (!cols.some((c) => (c as { name: string }).name === "directory")) {
+      return { ok: false, reason: "schema" };
+    }
+    d.query("UPDATE session SET directory = ? WHERE id = ?").run(directory, sessionId);
+    return { ok: true };
   } catch {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
     return { ok: false, reason: "db" };
   }
-  return { ok: true, sessionId: forked.session.id as string };
 }
 
 // Leader-chord global action (ctrl+x w): prompt for a new working directory
@@ -872,19 +760,28 @@ function changeDirectory(api: TuiPluginApi): void {
           return;
         }
         const base = me ? sessionTitle(me) : "Session";
-        const res = forkSessionToDirectory(id, dir, forkTitle(base, dbSessions()));
-        if (res.ok) {
-          close();
-          api.ui.toast({ variant: "info", message: `Forked into ${shortDir(dir)}` });
-          api.route.navigate("session", { sessionID: res.sessionId });
-        } else {
+        const forked = await api.client.session.fork({ sessionID: id });
+        if (!forked.data) {
+          api.ui.toast({ variant: "error", message: "Move failed" });
+          return;
+        }
+        const moved = setSessionDirectory(forked.data.id, dir);
+        if (!moved.ok) {
+          // Undo the fork so the failed move leaves no stray session behind.
+          void api.client.session.delete({ sessionID: forked.data.id });
           api.ui.toast({
             variant: "error",
-            message: res.reason === "schema" ? "Fork failed: unsupported database" : "Fork failed",
+            message: moved.reason === "schema" ? "Move failed: unsupported database" : "Move failed",
           });
+          return;
         }
+        await api.client.session.update({ sessionID: forked.data.id, title: base });
+        await api.client.session.delete({ sessionID: id });
+        close();
+        api.ui.toast({ variant: "info", message: `Moved to ${shortDir(dir)}` });
+        api.route.navigate("session", { sessionID: forked.data.id });
       } catch {
-        api.ui.toast({ variant: "error", message: "Fork failed" });
+        api.ui.toast({ variant: "error", message: "Move failed" });
       }
     })();
   };
@@ -901,7 +798,7 @@ function changeDirectory(api: TuiPluginApi): void {
   api.ui.dialog.replace(
     () => (
       <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <text fg={theme.text}><b>Fork session in directory</b></text>
+        <text fg={theme.text}><b>Move session to directory</b></text>
         <box height={1} />
         <input
           value={path()}
@@ -980,6 +877,18 @@ export function completePath(input: string): { value: string; candidates: string
     prefix = prefix.slice(0, j);
   }
   return { value: base + prefix, candidates: matches.map(withSlash) };
+}
+
+// Split a keybind for the picker hint bar: when the key's letter (the char
+// after the last "+") appears in the label, return the label remainder after
+// that letter so the hint can render key + remainder merged ("ctrl+n" + "ew"
+// → "ctrl+new"); null means the spaced form (key, gap, label) is used.
+// Exported for testing.
+export function splitKeybind(key: string, label: string): { key: string; suffix: string | null } {
+  if (!key.includes("+")) return { key, suffix: null };
+  const idx = label.indexOf(key[key.length - 1]);
+  if (idx === -1) return { key, suffix: null };
+  return { key, suffix: label.slice(idx + 1) };
 }
 
 // Scroll offset (in rows) that keeps the selected row centered: it stays put
@@ -1120,12 +1029,19 @@ export function PickerList(props: {
 // the session actions shown in the hint bar at the bottom. Bare keystrokes
 // fall through the layer to the search input, so typing filters the list at
 // all times.
-function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void {
+function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): void {
   const theme = api.theme.current;
   const [query, setQuery] = createSignal("");
   const [sessions, setSessions] = createSignal<SidebarSession[]>(dbSessions());
-  const [index, setIndex] = createSignal(0);
   const filtered = createMemo(() => fuzzyRank(query(), sessions()));
+  // Open with the current session highlighted; falls back to the top when it
+  // isn't in the list (e.g. no active session).
+  const [index, setIndex] = createSignal((() => {
+    const id = currentSessionID(api);
+    if (!id) return 0;
+    const i = filtered().findIndex((s) => s.id === id);
+    return i >= 0 ? i : 0;
+  })());
   const selected = () => filtered()[Math.min(index(), filtered().length - 1)];
   let unregisterLayer: (() => void) | undefined;
   const unregister = () => {
@@ -1203,14 +1119,23 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
       const b = overrides.find((x) => x.cmd === cmd);
       return b && typeof b.key === "string" ? b.key : defaultKeys[cmd] ?? cmd;
     };
-    const hint = (cmd: string, label: string) => (
-      <box flexDirection="row">
-        <text fg={theme.accent}><b>{hintKey(cmd)}</b></text>
-        <box width={1} />
-        <text fg={theme.textMuted}>{label}</text>
-        <box width={3} />
-      </box>
-    );
+    const hint = (cmd: string, label: string) => {
+      const { suffix } = splitKeybind(hintKey(cmd), label);
+      return (
+        <box flexDirection="row">
+          <text fg={theme.accent}><b>{hintKey(cmd)}</b></text>
+          {suffix === null ? (
+            <>
+              <box width={1} />
+              <text fg={theme.textMuted}>{label}</text>
+            </>
+          ) : (
+            <text fg={theme.textMuted}>{suffix}</text>
+          )}
+          <box width={3} />
+        </box>
+      );
+    };
     // Status per session (local state first, then other instances' broadcasts)
     // so each row is colored by what that session is doing: idle green, busy
     // purple, error orange, unknown white.
@@ -1227,6 +1152,25 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
     api.ui.dialog.setSize("xlarge");
     const rowLines = density === "comfortable" ? 2 : 1;
     const contentWidth = Math.max(20, Math.min((api.renderer.width || 130) - 10, 114));
+    // Hint bar: merged key+label hints ("ctrl+new") when the key letter is in
+    // the word, spaced otherwise; spill to a second row when they don't fit.
+    const pickerHints = [
+      { cmd: "session_surf.picker.new", label: "new" },
+      { cmd: "session_surf.picker.rename", label: "rename" },
+      { cmd: "session_surf.picker.delete", label: "delete" },
+      { cmd: "session_surf.picker.fork", label: "fork" },
+    ];
+    const hintWidth = (h: { cmd: string; label: string }) => {
+      const { suffix } = splitKeybind(hintKey(h.cmd), h.label);
+      const inner = suffix === null ? hintKey(h.cmd).length + 1 + h.label.length : hintKey(h.cmd).length + suffix.length;
+      return inner + 3;
+    };
+    const hintRows = () => {
+      const total = pickerHints.reduce((n, h) => n + hintWidth(h), 0);
+      if (total <= contentWidth) return [pickerHints];
+      const half = Math.ceil(pickerHints.length / 2);
+      return [pickerHints.slice(0, half), pickerHints.slice(half)];
+    };
     const maxListHeight = Math.max(3, Math.min(20, (api.renderer.height > 20 ? api.renderer.height : 30) - 10));
     const listHeight = createMemo(() => Math.min(filtered().length * rowLines, maxListHeight));
     api.ui.dialog.replace(() => (
@@ -1255,12 +1199,13 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "compact"): void
             onSelect={switchTo}
           />
         </Show>
-        <box flexDirection="row" paddingTop={1}>
-          {hint("session_surf.picker.new", "new")}
-          {hint("session_surf.picker.rename", "rename")}
-          {hint("session_surf.picker.delete", "delete")}
-          {hint("session_surf.picker.fork", "fork")}
-        </box>
+        <For each={hintRows()}>
+          {(row) => (
+            <box flexDirection="row" paddingTop={1}>
+              <For each={row}>{(h) => hint(h.cmd, h.label)}</For>
+            </box>
+          )}
+        </For>
       </box>
     ), unregister);
   };
@@ -1382,7 +1327,7 @@ const plugin: TuiPluginModule = {
     const combined = preset?.combined ?? false;
     const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     // Picker row layout: "compact" (one line) or "comfortable" (two lines).
-    const density: PickerDensity = options?.density === "comfortable" ? "comfortable" : "compact";
+    const density: PickerDensity = options?.density === "compact" ? "compact" : "comfortable";
     api.slots.register({
       order: 300,
       slots: {
@@ -1437,7 +1382,7 @@ const plugin: TuiPluginModule = {
         },
         {
           name: "session_surf.chdir",
-          title: "Fork session in directory",
+          title: "Move session to directory",
           category: "Session",
           namespace: "palette",
           run() {
@@ -1449,7 +1394,7 @@ const plugin: TuiPluginModule = {
         { key: "ctrl+o", cmd: "session_surf.picker.open", desc: "Open session picker" },
         { key: "ctrl+xj", cmd: "session_surf.next", desc: "Next session" },
         { key: "ctrl+xk", cmd: "session_surf.previous", desc: "Previous session" },
-        { key: "ctrl+xw", cmd: "session_surf.chdir", desc: "Fork in directory" },
+        { key: "ctrl+xw", cmd: "session_surf.chdir", desc: "Move to directory" },
         ...api.tuiConfig.keybinds.gather("session_surf", [
           "session_surf.picker.open",
           "session_surf.next",
