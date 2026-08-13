@@ -81,6 +81,7 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 | `openElsewhere` | boolean | `false` | Show a `•` dot on sessions open in another opencode instance |
 | `density` | `compact`, `comfortable` | `comfortable` | Session manager picker row layout: `compact` puts name + age + dir on one line; `comfortable` uses two lines (name, then age left / dir right) |
 | `subagents` | `collapsed`, `tree` | `tree` | Subagent display (see below) |
+| `childTtlMs` | number (ms) | `10000` | How long a completed subagent row stays visible after going idle; values below 1000 are ignored |
 | `debug` | boolean | `false` | Append diagnostics to `$TMPDIR/opencode-session-surf-status/debug.log` |
 
 Some symbols (`battery`, `gauge`, `speed`, `eyeblink`, `bell`, `help`, `bulb`,
@@ -99,12 +100,14 @@ Subagent display is controlled by `subagents`:
   time or directory and are clickable to open the subagent session. Busy state
   still folds up the tree, so a parent whose grandchild subagent is running
   shows busy too. Completed subagents drop off the list once they've been idle
-  past the freshness window — opencode never archives them, so without this
-  the tree would fill up with finished children. When opencode retries a failed
-  model call it spawns a duplicate subagent with the same title (e.g. the first
-  attempt exhausts its quota and is retried on a fallback model); the idle
-  duplicate is hidden as soon as the newer retry starts running, so the tree
-  never shows both halves of a retry pair.
+  past the freshness window (`childTtlMs`, 10 s by default) — opencode never
+  archives them, so without this the tree would fill up with finished children.
+  When opencode retries a failed model call it spawns a duplicate subagent with
+  the same title (e.g. the first attempt exhausts its quota and is retried on a
+  fallback model); the failed attempt can keep a retry status for a while, so
+  duplicates are deduped by creation order instead — the newest-created member
+  of each same-title group is kept and the rest hidden, whether they're busy or
+  idle.
 - **`collapsed`** — subagent sessions are hidden, but a session that
   spawned subagents stays busy while any of them (or their sub-subagents) is
   still running, so it never looks done mid-flight.

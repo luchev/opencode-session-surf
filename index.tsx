@@ -99,6 +99,9 @@ export const PRESETS: Record<string, Preset> = {
 const WAIT_MS = 450;
 // Anything updated in the last 15 minutes is Active.
 const ACTIVE_MS = 15 * 60 * 1000;
+// How long a completed subagent row stays visible after going idle (freshness
+// window for children; tunable via childTtlMs).
+const CHILD_TTL_MS = 10 * 1000;
 const DB_PATH = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
 
 // Cross-instance busy-status broadcast: each opencode process writes its own
@@ -206,10 +209,14 @@ type SidebarSession = {
 
 // A subagent (child) session: tracked for status but not a list row in
 // "collapsed" mode. Kids have no directory/time display — only a title.
+// `created` distinguishes retry duplicates (the fallback retry is always
+// created after the failed attempt); `updated` is unreliable for that because
+// the failure event bumps it after the retry already exists.
 type SidebarChild = {
   id: string;
   parentID: string;
   title: string;
+  created: number;
   updated: number;
 };
 
@@ -244,11 +251,23 @@ function dbSessions(): SidebarSession[] {
 function dbChildren(): SidebarChild[] {
   const rows = getDb()
     .query(
-      `SELECT id, parent_id, title, time_updated FROM session
+      `SELECT id, parent_id, title, time_created, time_updated FROM session
        WHERE parent_id IS NOT NULL AND time_archived IS NULL`,
     )
-    .all() as { id: string; parent_id: string; title: string | null; time_updated: number }[];
-  return rows.map((r) => ({ id: r.id, parentID: r.parent_id, title: r.title ?? "", updated: r.time_updated }));
+    .all() as {
+    id: string;
+    parent_id: string;
+    title: string | null;
+    time_created: number;
+    time_updated: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    parentID: r.parent_id,
+    title: r.title ?? "",
+    created: r.time_created,
+    updated: r.time_updated,
+  }));
 }
 
 export function relTime(ts: number, now = Date.now()): string {
@@ -550,33 +569,29 @@ export function ChildRow(props: {
 // completed subagents that have been idle past the freshness window are
 // hidden — opencode never archives them, so the tree would fill up with
 // finished children otherwise. Status folding (foldChildBusy) still covers
-// hidden children.
+// hidden children. ttlMs is the freshness window (defaults to the parent-row
+// window; the sidebar passes the user-tunable childTtlMs).
 export function isChildVisible(
   c: SidebarChild,
   statuses: Map<string, SessionStatus>,
   waitingIds: Set<string>,
   now: number,
+  ttlMs: number = ACTIVE_MS,
 ): boolean {
   return (
     waitingIds.has(c.id) ||
     isBusy(statuses.get(c.id)) ||
-    c.updated >= now - ACTIVE_MS
+    c.updated >= now - ttlMs
   );
 }
 
-// Model-retry dedupe: when opencode retries a failed model call it spawns a new
-// session with the same title and parent, leaving the failed attempt (e.g. an
-// exhausted model) as a duplicate that sits idle. Within a (parent, title)
-// group, an idle child is hidden as soon as a sibling is busy/waiting (the
-// failed attempt vanishes the moment the retry starts) or a strictly-newer
-// sibling is still fresh — so a stale attempt never reappears once the retry
-// finishes, and while both attempts are freshly idle the newer one wins.
-export function dedupeHiddenIds(
-  children: SidebarChild[],
-  statuses: Map<string, SessionStatus>,
-  waitingIds: Set<string>,
-  now: number,
-): Set<string> {
+// Model-retry dedupe: when opencode retries a failed model call it spawns a
+// new session with the same title and parent, leaving the failed attempt
+// (e.g. an exhausted model) as a duplicate. The failed attempt can keep a
+// retry status (still "busy") for a while, so status can't distinguish it —
+// but the fallback retry is always created AFTER the failure. Within a
+// (parent, title) group, every member but the newest-created one is hidden.
+export function dedupeHiddenIds(children: SidebarChild[]): Set<string> {
   const hidden = new Set<string>();
   const groups = new Map<string, SidebarChild[]>();
   for (const c of children) {
@@ -585,15 +600,16 @@ export function dedupeHiddenIds(
     if (list) list.push(c);
     else groups.set(key, [c]);
   }
-  const doing = (c: SidebarChild) => waitingIds.has(c.id) || isBusy(statuses.get(c.id));
-  const fresh = (c: SidebarChild) => c.updated >= now - ACTIVE_MS;
   for (const list of groups.values()) {
     if (list.length < 2) continue;
+    let newest = list[0];
     for (const c of list) {
-      if (doing(c)) continue;
-      const busySibling = list.some((o) => o !== c && doing(o));
-      const newerFreshSibling = list.some((o) => o !== c && fresh(o) && o.updated > c.updated);
-      if (busySibling || newerFreshSibling) hidden.add(c.id);
+      if (c.created > newest.created || (c.created === newest.created && c.id > newest.id)) {
+        newest = c;
+      }
+    }
+    for (const c of list) {
+      if (c !== newest) hidden.add(c.id);
     }
   }
   return hidden;
@@ -609,6 +625,7 @@ function SidebarSessions(props: {
   openElsewhere: boolean;
   combined: boolean;
   subagents: "collapsed" | "tree";
+  childTtl: number;
 }) {
   const theme = props.api.theme.current;
   const [sessions, setSessions] = createSignal<SidebarSession[]>([]);
@@ -742,9 +759,9 @@ function SidebarSessions(props: {
     return sessions().filter((s) => !activeIds().has(s.id) && ids.has(s.id));
   });
 
-  // Recomputed on status/waiting/refresh changes (children is refilled in
-  // refresh() alongside setSessions, so depending on statuses is enough).
-  const hiddenDupes = createMemo(() => dedupeHiddenIds(children, statuses(), waitingIds(), Date.now()));
+  // Recomputed on refresh changes (children is refilled in refresh() alongside
+  // setSessions, so depending on sessions is enough).
+  const hiddenDupes = createMemo(() => dedupeHiddenIds(children));
 
   const renderKids = (s: SidebarSession) =>
     props.subagents === "tree" ? (
@@ -753,7 +770,7 @@ function SidebarSessions(props: {
           (c) =>
             c.parentID === s.id &&
             !hiddenDupes().has(c.id) &&
-            isChildVisible(c, statuses(), waitingIds(), Date.now()),
+            isChildVisible(c, statuses(), waitingIds(), Date.now(), props.childTtl),
         )}
       >
         {(c) => (
@@ -1531,6 +1548,9 @@ const plugin: TuiPluginModule = {
     // into the parent; "tree" (default) also renders an indented row per child
     // with its own status.
     const subagents: "collapsed" | "tree" = options?.subagents === "collapsed" ? "collapsed" : "tree";
+    // How long a completed subagent row stays visible after going idle before
+    // it is hidden (freshness window); values below 1000 are ignored.
+    const childTtl = typeof options?.childTtlMs === "number" && options.childTtlMs >= 1000 ? options.childTtlMs : CHILD_TTL_MS;
     api.slots.register({
       order: 300,
       slots: {
@@ -1546,6 +1566,7 @@ const plugin: TuiPluginModule = {
               openElsewhere={openElsewhere}
               combined={combined}
               subagents={subagents}
+              childTtl={childTtl}
             />
           );
         },

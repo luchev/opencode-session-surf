@@ -223,7 +223,7 @@ describe("isBusy", () => {
 
 describe("foldChildBusy", () => {
   const status = (type: string) => ({ type }) as unknown as SessionStatus;
-  const child = (id: string, parentID: string) => ({ id, parentID, title: id, updated: 0 });
+  const child = (id: string, parentID: string) => ({ id, parentID, title: id, created: 0, updated: 0 });
   test("parent is busy while a direct child is busy", () => {
     const folded = foldChildBusy(
       new Map([["p", status("idle")], ["c", status("busy")]]),
@@ -272,7 +272,7 @@ describe("foldChildBusy", () => {
 describe("isChildVisible", () => {
   const status = (type: string) => ({ type }) as unknown as SessionStatus;
   const NOW = 1_700_000_000_000;
-  const child = (id: string, updatedAgo: number) => ({ id, parentID: "p", title: id, updated: NOW - updatedAgo });
+  const child = (id: string, updatedAgo: number) => ({ id, parentID: "p", title: id, created: 0, updated: NOW - updatedAgo });
 
   test("busy child is visible regardless of age", () => {
     expect(
@@ -298,108 +298,86 @@ describe("isChildVisible", () => {
     expect(isChildVisible(child("c", 999_999_999), new Map(), new Set(), NOW)).toBe(false);
     expect(isChildVisible(child("c", 1_000), new Map(), new Set(), NOW)).toBe(true);
   });
+  test("custom ttl shortens the freshness window", () => {
+    const c = child("c", 11_000); // fresh under the 15min default…
+    expect(isChildVisible(c, new Map(), new Set(), NOW)).toBe(true);
+    expect(isChildVisible(c, new Map(), new Set(), NOW, 10_000)).toBe(false); // …stale under 10s
+  });
 });
 
 describe("dedupeHiddenIds", () => {
-  const status = (type: string) => ({ type }) as unknown as SessionStatus;
   const NOW = 1_700_000_000_000;
-  // updatedAgo relative to NOW; defaults to same parent+title so tests read as
-  // a retry pair.
-  const kid = (id: string, opts: { parent?: string; title?: string; updatedAgo?: number } = {}) => ({
+  // Defaults: same parent+title so tests read as a retry pair; createdAgo and
+  // updatedAgo are relative to NOW.
+  const kid = (
+    id: string,
+    opts: { parent?: string; title?: string; createdAgo?: number; updatedAgo?: number } = {},
+  ) => ({
     id,
     parentID: opts.parent ?? "p",
     title: opts.title ?? "t",
+    created: NOW - (opts.createdAgo ?? 0),
     updated: NOW - (opts.updatedAgo ?? 0),
   });
 
-  test("idle stale attempt is hidden while a newer busy retry runs", () => {
-    const a = kid("a", { updatedAgo: 999_999_999 });
-    const b = kid("b");
-    const hidden = dedupeHiddenIds(
-      [a, b],
-      new Map([["b", status("busy")]]),
-      new Set(),
-      NOW,
-    );
+  test("failed attempt is hidden while the newer fallback retry runs", () => {
+    const a = kid("a", { createdAgo: 10_000, updatedAgo: 1_000 });
+    const b = kid("b", { createdAgo: 5_000, updatedAgo: 5_000 });
+    const hidden = dedupeHiddenIds([a, b]);
     expect(hidden.has(a.id)).toBe(true);
     expect(hidden.has(b.id)).toBe(false);
   });
 
-  test("idle stale attempt is hidden while a newer fresh retry sits idle", () => {
-    const a = kid("a", { updatedAgo: 999_999_999 });
-    const b = kid("b", { updatedAgo: 1_000 });
-    const hidden = dedupeHiddenIds([a, b], new Map(), new Set(), NOW);
+  test("newer fallback retry is kept even when it is the idle one", () => {
+    const a = kid("a", { createdAgo: 10_000 });
+    const b = kid("b", { createdAgo: 5_000 });
+    const hidden = dedupeHiddenIds([a, b]);
     expect(hidden.has(a.id)).toBe(true);
     expect(hidden.has(b.id)).toBe(false);
   });
 
-  test("both attempts fresh and idle: the newer one wins", () => {
-    const a = kid("a", { updatedAgo: 5_000 });
-    const b = kid("b", { updatedAgo: 1_000 });
-    const hidden = dedupeHiddenIds([a, b], new Map(), new Set(), NOW);
+  test("both freshly idle: the newer-created one wins", () => {
+    const a = kid("a", { createdAgo: 5_000 });
+    const b = kid("b", { createdAgo: 1_000 });
+    const hidden = dedupeHiddenIds([a, b]);
     expect(hidden.has(a.id)).toBe(true);
     expect(hidden.has(b.id)).toBe(false);
   });
 
-  test("both attempts stale and idle: neither is hidden (freshness handles it)", () => {
-    const a = kid("a", { updatedAgo: 999_999_999 });
-    const b = kid("b", { updatedAgo: 999_999_998 });
-    const hidden = dedupeHiddenIds([a, b], new Map(), new Set(), NOW);
-    expect(hidden.has(a.id)).toBe(false);
-    expect(hidden.has(b.id)).toBe(false);
+  test("older busy attempt is hidden while a newer sibling exists", () => {
+    const a = kid("a", { createdAgo: 10_000 });
+    const b = kid("b", { createdAgo: 5_000 });
+    const hidden = dedupeHiddenIds([a, b]);
+    expect(hidden.has(a.id)).toBe(true);
   });
 
-  test("two busy same-title subagents are both kept", () => {
-    const a = kid("a", { updatedAgo: 999_999_999 });
-    const b = kid("b");
-    const hidden = dedupeHiddenIds(
-      [a, b],
-      new Map([
-        ["a", status("busy")],
-        ["b", status("busy")],
-      ]),
-      new Set(),
-      NOW,
-    );
-    expect(hidden.has(a.id)).toBe(false);
-    expect(hidden.has(b.id)).toBe(false);
+  test("cascade of retries keeps only the newest-created member", () => {
+    const a = kid("a", { createdAgo: 30_000 });
+    const b = kid("b", { createdAgo: 20_000 });
+    const c = kid("c", { createdAgo: 10_000 });
+    const hidden = dedupeHiddenIds([a, b, c]);
+    expect(hidden.has(a.id)).toBe(true);
+    expect(hidden.has(b.id)).toBe(true);
+    expect(hidden.has(c.id)).toBe(false);
   });
 
   test("same title under different parents is not deduped", () => {
-    const a = kid("a", { parent: "p1", updatedAgo: 999_999_999 });
-    const b = kid("b", { parent: "p2" });
-    const hidden = dedupeHiddenIds(
-      [a, b],
-      new Map([["b", status("busy")]]),
-      new Set(),
-      NOW,
-    );
-    expect(hidden.has(a.id)).toBe(false);
+    const a = kid("a", { parent: "p1", createdAgo: 10_000 });
+    const b = kid("b", { parent: "p2", createdAgo: 5_000 });
+    const hidden = dedupeHiddenIds([a, b]);
+    expect(hidden.size).toBe(0);
   });
 
   test("different titles under the same parent are not deduped", () => {
-    const a = kid("a", { title: "t1", updatedAgo: 999_999_999 });
-    const b = kid("b", { title: "t2" });
-    const hidden = dedupeHiddenIds(
-      [a, b],
-      new Map([["b", status("busy")]]),
-      new Set(),
-      NOW,
-    );
-    expect(hidden.has(a.id)).toBe(false);
+    const a = kid("a", { title: "t1", createdAgo: 10_000 });
+    const b = kid("b", { title: "t2", createdAgo: 5_000 });
+    const hidden = dedupeHiddenIds([a, b]);
+    expect(hidden.size).toBe(0);
   });
 
-  test("idle child is hidden while an older sibling is busy", () => {
-    const a = kid("a", { updatedAgo: 999_999_999, title: "a" });
-    const b = kid("b", { updatedAgo: 1_000, title: "a" });
-    const hidden = dedupeHiddenIds(
-      [a, b],
-      new Map([["a", status("busy")]]),
-      new Set(),
-      NOW,
-    );
-    expect(hidden.has(b.id)).toBe(true);
-    expect(hidden.has(a.id)).toBe(false);
+  test("single member group is never deduped", () => {
+    const a = kid("a");
+    expect(dedupeHiddenIds([a]).size).toBe(0);
   });
 });
 
