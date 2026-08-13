@@ -564,6 +564,41 @@ export function isChildVisible(
   );
 }
 
+// Model-retry dedupe: when opencode retries a failed model call it spawns a new
+// session with the same title and parent, leaving the failed attempt (e.g. an
+// exhausted model) as a duplicate that sits idle. Within a (parent, title)
+// group, an idle child is hidden as soon as a sibling is busy/waiting (the
+// failed attempt vanishes the moment the retry starts) or a strictly-newer
+// sibling is still fresh — so a stale attempt never reappears once the retry
+// finishes, and while both attempts are freshly idle the newer one wins.
+export function dedupeHiddenIds(
+  children: SidebarChild[],
+  statuses: Map<string, SessionStatus>,
+  waitingIds: Set<string>,
+  now: number,
+): Set<string> {
+  const hidden = new Set<string>();
+  const groups = new Map<string, SidebarChild[]>();
+  for (const c of children) {
+    const key = `${c.parentID}\u0000${c.title}`;
+    const list = groups.get(key);
+    if (list) list.push(c);
+    else groups.set(key, [c]);
+  }
+  const doing = (c: SidebarChild) => waitingIds.has(c.id) || isBusy(statuses.get(c.id));
+  const fresh = (c: SidebarChild) => c.updated >= now - ACTIVE_MS;
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    for (const c of list) {
+      if (doing(c)) continue;
+      const busySibling = list.some((o) => o !== c && doing(o));
+      const newerFreshSibling = list.some((o) => o !== c && fresh(o) && o.updated > c.updated);
+      if (busySibling || newerFreshSibling) hidden.add(c.id);
+    }
+  }
+  return hidden;
+}
+
 function SidebarSessions(props: {
   api: TuiPluginApi;
   session_id: string;
@@ -707,9 +742,20 @@ function SidebarSessions(props: {
     return sessions().filter((s) => !activeIds().has(s.id) && ids.has(s.id));
   });
 
+  // Recomputed on status/waiting/refresh changes (children is refilled in
+  // refresh() alongside setSessions, so depending on statuses is enough).
+  const hiddenDupes = createMemo(() => dedupeHiddenIds(children, statuses(), waitingIds(), Date.now()));
+
   const renderKids = (s: SidebarSession) =>
     props.subagents === "tree" ? (
-      <For each={children.filter((c) => c.parentID === s.id && isChildVisible(c, statuses(), waitingIds(), Date.now()))}>
+      <For
+        each={children.filter(
+          (c) =>
+            c.parentID === s.id &&
+            !hiddenDupes().has(c.id) &&
+            isChildVisible(c, statuses(), waitingIds(), Date.now()),
+        )}
+      >
         {(c) => (
           <ChildRow
             child={c}

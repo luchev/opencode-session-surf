@@ -100,7 +100,11 @@ Subagent display is controlled by `subagents`:
   still folds up the tree, so a parent whose grandchild subagent is running
   shows busy too. Completed subagents drop off the list once they've been idle
   past the freshness window — opencode never archives them, so without this
-  the tree would fill up with finished children.
+  the tree would fill up with finished children. When opencode retries a failed
+  model call it spawns a duplicate subagent with the same title (e.g. the first
+  attempt exhausts its quota and is retried on a fallback model); the idle
+  duplicate is hidden as soon as the newer retry starts running, so the tree
+  never shows both halves of a retry pair.
 - **`collapsed`** — subagent sessions are hidden, but a session that
   spawned subagents stays busy while any of them (or their sub-subagents) is
   still running, so it never looks done mid-flight.

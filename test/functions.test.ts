@@ -32,6 +32,7 @@ import {
   rowForeground,
   foldChildBusy,
   isChildVisible,
+  dedupeHiddenIds,
 } from "../index.tsx";
 
 describe("centerScrollTop", () => {
@@ -296,6 +297,109 @@ describe("isChildVisible", () => {
   test("child without a status falls back to freshness", () => {
     expect(isChildVisible(child("c", 999_999_999), new Map(), new Set(), NOW)).toBe(false);
     expect(isChildVisible(child("c", 1_000), new Map(), new Set(), NOW)).toBe(true);
+  });
+});
+
+describe("dedupeHiddenIds", () => {
+  const status = (type: string) => ({ type }) as unknown as SessionStatus;
+  const NOW = 1_700_000_000_000;
+  // updatedAgo relative to NOW; defaults to same parent+title so tests read as
+  // a retry pair.
+  const kid = (id: string, opts: { parent?: string; title?: string; updatedAgo?: number } = {}) => ({
+    id,
+    parentID: opts.parent ?? "p",
+    title: opts.title ?? "t",
+    updated: NOW - (opts.updatedAgo ?? 0),
+  });
+
+  test("idle stale attempt is hidden while a newer busy retry runs", () => {
+    const a = kid("a", { updatedAgo: 999_999_999 });
+    const b = kid("b");
+    const hidden = dedupeHiddenIds(
+      [a, b],
+      new Map([["b", status("busy")]]),
+      new Set(),
+      NOW,
+    );
+    expect(hidden.has(a.id)).toBe(true);
+    expect(hidden.has(b.id)).toBe(false);
+  });
+
+  test("idle stale attempt is hidden while a newer fresh retry sits idle", () => {
+    const a = kid("a", { updatedAgo: 999_999_999 });
+    const b = kid("b", { updatedAgo: 1_000 });
+    const hidden = dedupeHiddenIds([a, b], new Map(), new Set(), NOW);
+    expect(hidden.has(a.id)).toBe(true);
+    expect(hidden.has(b.id)).toBe(false);
+  });
+
+  test("both attempts fresh and idle: the newer one wins", () => {
+    const a = kid("a", { updatedAgo: 5_000 });
+    const b = kid("b", { updatedAgo: 1_000 });
+    const hidden = dedupeHiddenIds([a, b], new Map(), new Set(), NOW);
+    expect(hidden.has(a.id)).toBe(true);
+    expect(hidden.has(b.id)).toBe(false);
+  });
+
+  test("both attempts stale and idle: neither is hidden (freshness handles it)", () => {
+    const a = kid("a", { updatedAgo: 999_999_999 });
+    const b = kid("b", { updatedAgo: 999_999_998 });
+    const hidden = dedupeHiddenIds([a, b], new Map(), new Set(), NOW);
+    expect(hidden.has(a.id)).toBe(false);
+    expect(hidden.has(b.id)).toBe(false);
+  });
+
+  test("two busy same-title subagents are both kept", () => {
+    const a = kid("a", { updatedAgo: 999_999_999 });
+    const b = kid("b");
+    const hidden = dedupeHiddenIds(
+      [a, b],
+      new Map([
+        ["a", status("busy")],
+        ["b", status("busy")],
+      ]),
+      new Set(),
+      NOW,
+    );
+    expect(hidden.has(a.id)).toBe(false);
+    expect(hidden.has(b.id)).toBe(false);
+  });
+
+  test("same title under different parents is not deduped", () => {
+    const a = kid("a", { parent: "p1", updatedAgo: 999_999_999 });
+    const b = kid("b", { parent: "p2" });
+    const hidden = dedupeHiddenIds(
+      [a, b],
+      new Map([["b", status("busy")]]),
+      new Set(),
+      NOW,
+    );
+    expect(hidden.has(a.id)).toBe(false);
+  });
+
+  test("different titles under the same parent are not deduped", () => {
+    const a = kid("a", { title: "t1", updatedAgo: 999_999_999 });
+    const b = kid("b", { title: "t2" });
+    const hidden = dedupeHiddenIds(
+      [a, b],
+      new Map([["b", status("busy")]]),
+      new Set(),
+      NOW,
+    );
+    expect(hidden.has(a.id)).toBe(false);
+  });
+
+  test("idle child is hidden while an older sibling is busy", () => {
+    const a = kid("a", { updatedAgo: 999_999_999, title: "a" });
+    const b = kid("b", { updatedAgo: 1_000, title: "a" });
+    const hidden = dedupeHiddenIds(
+      [a, b],
+      new Map([["a", status("busy")]]),
+      new Set(),
+      NOW,
+    );
+    expect(hidden.has(b.id)).toBe(true);
+    expect(hidden.has(a.id)).toBe(false);
   });
 });
 
