@@ -31,7 +31,7 @@ async function frameFor(node: () => unknown): Promise<string> {
 }
 
 describe("ChildRow", () => {
-  const child = { id: "ses_child", parentID: "ses_123", title: "delegation" };
+  const child = { id: "ses_child", parentID: "ses_123", title: "delegation", updated: 0 };
   test("working child shows its own spinner frame and title", async () => {
     const frame = await frameFor(() => (
       <ChildRow
