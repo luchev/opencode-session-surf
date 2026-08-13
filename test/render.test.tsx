@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/solid";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { registerSpinner } from "opentui-spinner/solid";
-import { PickerList, SessionRow, SPINNERS, WAITERS } from "../index.tsx";
+import { PickerList, SessionRow, ChildRow, SPINNERS, WAITERS } from "../index.tsx";
 
 registerSpinner();
 
@@ -29,6 +29,58 @@ async function frameFor(node: () => unknown): Promise<string> {
   await t.renderOnce();
   return t.captureCharFrame();
 }
+
+describe("ChildRow", () => {
+  const child = { id: "ses_child", parentID: "ses_123", title: "delegation" };
+  test("working child shows its own spinner frame and title", async () => {
+    const frame = await frameFor(() => (
+      <ChildRow
+        child={child}
+        waitingFrames={[]}
+        spinnerFrames={SPINNERS.arc}
+        waiting={() => false}
+        working={() => true}
+        theme={theme}
+        onNavigate={() => {}}
+      />
+    ));
+    expect(frame).toContain(SPINNERS.arc[0]);
+    expect(frame).toContain("delegation");
+  });
+
+  test("waiting child shows the waiting frame", async () => {
+    const frame = await frameFor(() => (
+      <ChildRow
+        child={child}
+        waitingFrames={WAITERS.pulse}
+        spinnerFrames={SPINNERS.arc}
+        waiting={() => true}
+        working={() => false}
+        theme={theme}
+        onNavigate={() => {}}
+      />
+    ));
+    expect(frame).toContain(WAITERS.pulse[0]);
+    expect(frame).toContain("delegation");
+  });
+
+  test("idle child shows no spinner, just the title", async () => {
+    const frame = await frameFor(() => (
+      <ChildRow
+        child={child}
+        waitingFrames={WAITERS.pulse}
+        spinnerFrames={SPINNERS.arc}
+        waiting={() => false}
+        working={() => false}
+        theme={theme}
+        onNavigate={() => {}}
+      />
+    ));
+    expect(frame).not.toContain(SPINNERS.arc[0]);
+    expect(frame).not.toContain(WAITERS.pulse[0]);
+    expect(frame).toContain("delegation");
+  });
+});
 
 describe("SessionRow", () => {
   test("busy row shows the working spinner frame and title", async () => {

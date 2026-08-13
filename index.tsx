@@ -204,6 +204,14 @@ type SidebarSession = {
   time: { created: number; updated: number };
 };
 
+// A subagent (child) session: tracked for status but not a list row in
+// "collapsed" mode. Kids have no directory/time display — only a title.
+type SidebarChild = {
+  id: string;
+  parentID: string;
+  title: string;
+};
+
 let db: Database | undefined;
 function getDb(): Database {
   if (!db) db = new Database(DB_PATH, { readonly: true });
@@ -228,6 +236,18 @@ function dbSessions(): SidebarSession[] {
     title: r.title,
     time: { created: r.time_created, updated: r.time_updated },
   }));
+}
+
+// All subagent (child) sessions — children of the rows above, plus deeper
+// generations (a subagent's own subagents), so status can fold up the tree.
+function dbChildren(): SidebarChild[] {
+  const rows = getDb()
+    .query(
+      `SELECT id, parent_id, title FROM session
+       WHERE parent_id IS NOT NULL AND time_archived IS NULL`,
+    )
+    .all() as { id: string; parent_id: string; title: string | null }[];
+  return rows.map((r) => ({ id: r.id, parentID: r.parent_id, title: r.title ?? "" }));
 }
 
 export function relTime(ts: number, now = Date.now()): string {
@@ -350,6 +370,35 @@ export function isBusy(status: SessionStatus | undefined): boolean {
   return status?.type === "busy" || status?.type === "retry";
 }
 
+// A session is shown busy while any of its subagent descendants is busy: the
+// parent's own status flips to idle the moment its message finishes, even
+// though a spawned subagent is still running. Children aren't list rows (in
+// "collapsed" mode), so busy must fold up through the parent links.
+export function foldChildBusy(
+  statuses: Map<string, SessionStatus>,
+  children: SidebarChild[],
+): Map<string, SessionStatus> {
+  const folded = new Map(statuses);
+  const byParent = new Map<string, string[]>();
+  for (const c of children) {
+    const list = byParent.get(c.parentID);
+    if (list) list.push(c.id);
+    else byParent.set(c.parentID, [c.id]);
+  }
+  const isBusyId = (id: string) => isBusy(folded.get(id));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [parentId, kidIds] of byParent) {
+      if (!isBusyId(parentId) && kidIds.some(isBusyId)) {
+        folded.set(parentId, { type: "busy" });
+        changed = true;
+      }
+    }
+  }
+  return folded;
+}
+
 type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" | "primary" | "success">;
 
 // Foreground color for a sidebar row's title. The focused session is always
@@ -464,6 +513,38 @@ export function SessionRow(props: {
   );
 }
 
+// A subagent row in "tree" mode: indented under its parent, status spinner in
+// its own cell, muted title, no time/directory. Clicking navigates to the
+// subagent session.
+export function ChildRow(props: {
+  child: SidebarChild;
+  waitingFrames: string[];
+  spinnerFrames: string[];
+  waiting: () => boolean;
+  working: () => boolean;
+  theme: RowTheme;
+  onNavigate: () => void;
+}) {
+  return (
+    <box paddingLeft={2} paddingRight={1} onMouseDown={(_e) => props.onNavigate()}>
+      <box flexDirection="row">
+        <box width={1}>
+          {props.waiting() && props.waitingFrames.length > 0 ? (
+            <spinner frames={props.waitingFrames} interval={WAIT_MS} color={props.theme.accent} />
+          ) : null}
+          {!props.waiting() && props.working() && props.spinnerFrames.length > 0 ? (
+            <spinner frames={props.spinnerFrames} interval={SPINNER_MS} color={props.theme.info} />
+          ) : null}
+        </box>
+        <text fg={props.theme.textMuted} wrapMode="none">
+          {" "}
+          {props.child.title}
+        </text>
+      </box>
+    </box>
+  );
+}
+
 function SidebarSessions(props: {
   api: TuiPluginApi;
   session_id: string;
@@ -473,18 +554,25 @@ function SidebarSessions(props: {
   pollMs: number;
   openElsewhere: boolean;
   combined: boolean;
+  subagents: "collapsed" | "tree";
 }) {
   const theme = props.api.theme.current;
   const [sessions, setSessions] = createSignal<SidebarSession[]>([]);
+  // Subagent sessions: hidden rows in "collapsed" mode (still folded into
+  // parent status), shown as indented rows in "tree" mode.
+  let children: SidebarChild[] = [];
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [statuses, setStatuses] = createSignal<Map<string, SessionStatus>>(new Map());
   const [waitingIds, setWaitingIds] = createSignal<Set<string>>(new Set());
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
 
+  const sessionIds = () => [...sessions().map((s) => s.id), ...children.map((c) => c.id)];
+
   async function refresh() {
     try {
       setSessions(dbSessions());
+      children = dbChildren();
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -501,29 +589,28 @@ function SidebarSessions(props: {
   // miss/lag the process's own foreground session.
   function localStatusesFromState(): Map<string, SessionStatus> {
     const m = new Map<string, SessionStatus>();
-    for (const s of sessions()) {
-      const st = props.api.state.session.status(s.id);
-      if (st) m.set(s.id, st);
+    for (const id of sessionIds()) {
+      const st = props.api.state.session.status(id);
+      if (st) m.set(id, st);
     }
     return m;
   }
 
   function localWaitingIds(): string[] {
-    return sessions()
+    return sessionIds()
       .filter(
-        (s) =>
-          props.api.state.session.question(s.id).length > 0 ||
-          props.api.state.session.permission(s.id).length > 0,
-      )
-      .map((s) => s.id);
+        (id) =>
+          props.api.state.session.question(id).length > 0 ||
+          props.api.state.session.permission(id).length > 0,
+      );
   }
 
   function commitStatuses() {
-    const local = localStatusesFromState();
+    const local = foldChildBusy(localStatusesFromState(), children);
     const localWaiting = localWaitingIds();
     writeOwnStatuses(local, localWaiting);
     const remotes = readCrossInstance(props.pollMs * 3);
-    const merged = mergeBusy(local, remotes);
+    const merged = foldChildBusy(mergeBusy(local, remotes), children);
     setStatuses(merged);
     setWaitingIds(mergeWaiting(localWaiting, remotes));
     debugLog(`statuses busy=${[...merged.values()].filter(isBusy).length} waiting=${waitingIds().size}`);
@@ -548,8 +635,8 @@ function SidebarSessions(props: {
   try {
     ensureStatusDir();
     watcher = fsWatch(STATUS_DIR, () => {
-    const remotes = readCrossInstance(props.pollMs * 3);
-      setStatuses(mergeBusy(localStatusesFromState(), remotes));
+      const remotes = readCrossInstance(props.pollMs * 3);
+      setStatuses(foldChildBusy(mergeBusy(localStatusesFromState(), remotes), children));
       setWaitingIds(mergeWaiting(localWaitingIds(), remotes));
       props.api.renderer.requestRender();
     });
@@ -601,22 +688,42 @@ function SidebarSessions(props: {
     return sessions().filter((s) => !activeIds().has(s.id) && ids.has(s.id));
   });
 
+  const renderKids = (s: SidebarSession) =>
+    props.subagents === "tree" ? (
+      <For each={children.filter((c) => c.parentID === s.id)}>
+        {(c) => (
+          <ChildRow
+            child={c}
+            waitingFrames={props.waiting}
+            spinnerFrames={props.spinner}
+            waiting={() => waitingIds().has(c.id)}
+            working={() => !waitingIds().has(c.id) && isBusy(statuses().get(c.id))}
+            theme={theme}
+            onNavigate={() => props.api.route.navigate("session", { sessionID: c.id })}
+          />
+        )}
+      </For>
+    ) : null;
+
   const renderRow = (s: SidebarSession, inActive: boolean) => (
-    <SessionRow
-      s={s}
-      isCurrent={s.id === props.session_id}
-      inActive={inActive}
-      marker={props.marker}
-      waitingFrames={props.waiting}
-      spinnerFrames={props.spinner}
-      waiting={() => isWaiting(s.id)}
-      working={() => !isWaiting(s.id) && isBusy(statuses().get(s.id))}
-      status={() => statuses().get(s.id)}
-      theme={theme}
-      onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
-      openElsewhere={props.openElsewhere}
-      combined={props.combined}
-    />
+    <>
+      <SessionRow
+        s={s}
+        isCurrent={s.id === props.session_id}
+        inActive={inActive}
+        marker={props.marker}
+        waitingFrames={props.waiting}
+        spinnerFrames={props.spinner}
+        waiting={() => isWaiting(s.id)}
+        working={() => !isWaiting(s.id) && isBusy(statuses().get(s.id))}
+        status={() => statuses().get(s.id)}
+        theme={theme}
+        onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
+        openElsewhere={props.openElsewhere}
+        combined={props.combined}
+      />
+      {renderKids(s)}
+    </>
   );
 
   return (
@@ -1355,6 +1462,10 @@ const plugin: TuiPluginModule = {
     const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     // Picker row layout: "compact" (one line) or "comfortable" (two lines).
     const density: PickerDensity = options?.density === "compact" ? "compact" : "comfortable";
+    // Subagent display: "collapsed" hides children but folds their busy state
+    // into the parent; "tree" also renders an indented row per child with its
+    // own status.
+    const subagents: "collapsed" | "tree" = options?.subagents === "tree" ? "tree" : "collapsed";
     api.slots.register({
       order: 300,
       slots: {
@@ -1369,6 +1480,7 @@ const plugin: TuiPluginModule = {
               pollMs={pollMs}
               openElsewhere={openElsewhere}
               combined={combined}
+              subagents={subagents}
             />
           );
         },

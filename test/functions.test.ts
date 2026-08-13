@@ -30,6 +30,7 @@ import {
   splitKeybind,
   bySessionTitle,
   rowForeground,
+  foldChildBusy,
 } from "../index.tsx";
 
 describe("centerScrollTop", () => {
@@ -215,6 +216,54 @@ describe("isBusy", () => {
     expect(isBusy(status("idle"))).toBe(false);
     expect(isBusy(status("failed"))).toBe(false);
     expect(isBusy(undefined)).toBe(false);
+  });
+});
+
+describe("foldChildBusy", () => {
+  const status = (type: string) => ({ type }) as unknown as SessionStatus;
+  const child = (id: string, parentID: string) => ({ id, parentID, title: id });
+  test("parent is busy while a direct child is busy", () => {
+    const folded = foldChildBusy(
+      new Map([["p", status("idle")], ["c", status("busy")]]),
+      [child("c", "p")],
+    );
+    expect(isBusy(folded.get("p"))).toBe(true);
+  });
+  test("busy folds up multiple generations", () => {
+    const folded = foldChildBusy(
+      new Map([
+        ["p", status("idle")],
+        ["c", status("idle")],
+        ["gc", status("retry")],
+      ]),
+      [child("c", "p"), child("gc", "c")],
+    );
+    expect(isBusy(folded.get("c"))).toBe(true);
+    expect(isBusy(folded.get("p"))).toBe(true);
+  });
+  test("idle children leave the parent idle", () => {
+    const folded = foldChildBusy(
+      new Map([["p", status("idle")], ["c", status("idle")]]),
+      [child("c", "p")],
+    );
+    expect(isBusy(folded.get("p"))).toBe(false);
+  });
+  test("already-busy parent stays busy", () => {
+    const folded = foldChildBusy(
+      new Map([["p", status("busy")], ["c", status("idle")]]),
+      [child("c", "p")],
+    );
+    expect(folded.get("p")?.type).toBe("busy");
+  });
+  test("child whose parent is not listed keeps its own status", () => {
+    const folded = foldChildBusy(
+      new Map([["c", status("busy")]]),
+      [child("c", "ghost")],
+    );
+    expect(folded.get("c")?.type).toBe("busy");
+    // The unknown parent is marked busy too; it is never rendered, so this is
+    // harmless — the point is the child's status survives folding.
+    expect(folded.get("ghost")?.type).toBe("busy");
   });
 });
 
