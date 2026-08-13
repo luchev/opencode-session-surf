@@ -72,7 +72,7 @@ Plugin options are set through the `plugin` array in `tui.json` (tuple form):
 ### Options
 
 | Option | Values | Default | Description |
-|---|---|---|---|---|
+|---|---|---|---|
 | `spinner` | `dots`, `arc`, `sweep`, `fill`, `bounce`, `sparkle`, `block`, `battery`, `gauge`, `speed`, `none`, `""` | `dots` | Working spinner style; `none` renders a blank cell, `""` hides it |
 | `waiting` | `emoji`, `ellipsis`, `question`, `pulse`, `block`, `bounce`, `eyeblink`, `bell`, `help`, `bulb`, `ghost`, `none`, `""` | `pulse` | Waiting-for-input indicator; `none` renders a blank cell, `""` hides it |
 | `marker` | `dot`, `square`, `arrow`, `star`, `none`, `caret`, `ping`, `creation`, `sprout` | `dot` | Active-session marker glyph |

@@ -5,7 +5,7 @@ import type { TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-a
 import type { BoxRenderable } from "@opentui/core";
 import type { SessionStatus } from "@opencode-ai/sdk";
 import { Database } from "bun:sqlite";
-import { mkdirSync, readdirSync, readFileSync, appendFileSync, statSync, watch as fsWatch, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, appendFileSync, realpathSync, statSync, watch as fsWatch, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -767,13 +767,18 @@ function moveSessionDialog(api: TuiPluginApi, id: string): void {
           api.ui.toast({ variant: "error", message: "Not a directory" });
           return;
         }
+        // Canonicalize symlinks (e.g. /tmp → /private/tmp on macOS) so the stored
+        // directory matches opencode's own realpath form; a symlink path like
+        // "/tmp" doesn't match the server's project dir and the switch silently
+        // fails to land.
+        const canonical = realpathSync(dir);
         const base = me ? sessionTitle(me) : "Session";
         const forked = await api.client.session.fork({ sessionID: id });
         if (!forked.data) {
           api.ui.toast({ variant: "error", message: "Move failed" });
           return;
         }
-        const moved = setSessionDirectory(forked.data.id, dir);
+        const moved = setSessionDirectory(forked.data.id, canonical);
         if (!moved.ok) {
           // Undo the fork so the failed move leaves no stray session behind.
           void api.client.session.delete({ sessionID: forked.data.id });
@@ -786,7 +791,7 @@ function moveSessionDialog(api: TuiPluginApi, id: string): void {
         await api.client.session.update({ sessionID: forked.data.id, title: base });
         await api.client.session.delete({ sessionID: id });
         close();
-        api.ui.toast({ variant: "info", message: `Moved to ${shortDir(dir)}` });
+        api.ui.toast({ variant: "info", message: `Moved to ${shortDir(canonical)}` });
         api.route.navigate("session", { sessionID: forked.data.id });
       } catch {
         api.ui.toast({ variant: "error", message: "Move failed" });
@@ -888,15 +893,16 @@ export function completePath(input: string): { value: string; candidates: string
 }
 
 // Split a keybind for the picker hint bar: when the key's letter (the char
-// after the last "+") appears in the label, return the label remainder after
-// that letter so the hint can render key + remainder merged ("ctrl+n" + "ew"
-// → "ctrl+new"); null means the spaced form (key, gap, label) is used.
+// after the last "+") starts the label, return the label remainder so the hint
+// can render key + remainder merged ("ctrl+n" + "ew" → "ctrl+new"); null means
+// the spaced form (key, gap, label) is used. Only a leading match merges, so
+// multi-word labels like "switch workdir" stay spaced ("ctrl+w switch workdir").
 // Exported for testing.
 export function splitKeybind(key: string, label: string): { key: string; suffix: string | null } {
   if (!key.includes("+")) return { key, suffix: null };
-  const idx = label.indexOf(key[key.length - 1]);
-  if (idx === -1) return { key, suffix: null };
-  return { key, suffix: label.slice(idx + 1) };
+  const letter = key[key.length - 1];
+  if (label[0] !== letter) return { key, suffix: null };
+  return { key, suffix: label.slice(1) };
 }
 
 // Scroll offset (in rows) that keeps the selected row centered: it stays put
@@ -1135,17 +1141,16 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     const hint = (cmd: string, label: string) => {
       const { suffix } = splitKeybind(hintKey(cmd), label);
       return (
-        <box flexDirection="row">
-          <text fg={theme.accent}><b>{hintKey(cmd)}</b></text>
+        <box flexDirection="row" flexShrink={0} paddingRight={3}>
+          <text fg={theme.accent} wrapMode="none"><b>{hintKey(cmd)}</b></text>
           {suffix === null ? (
             <>
               <box width={1} />
-              <text fg={theme.textMuted}>{label}</text>
+              <text fg={theme.textMuted} wrapMode="none">{label}</text>
             </>
           ) : (
-            <text fg={theme.textMuted}>{suffix}</text>
+            <text fg={theme.textMuted} wrapMode="none">{suffix}</text>
           )}
-          <box width={3} />
         </box>
       );
     };
@@ -1166,25 +1171,15 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     const rowLines = density === "comfortable" ? 2 : 1;
     const contentWidth = Math.max(20, Math.min((api.renderer.width || 130) - 10, 114));
     // Hint bar: merged key+label hints ("ctrl+new") when the key letter is in
-    // the word, spaced otherwise; spill to a second row when they don't fit.
+    // the word, spaced otherwise. flexWrap keeps each hint atomic (flexShrink=0)
+    // and spills a whole item to the next row when it doesn't fit.
     const pickerHints = [
-      { cmd: "session_surf.picker.move", label: "move" },
-      { cmd: "session_surf.picker.new", label: "new" },
       { cmd: "session_surf.picker.rename", label: "rename" },
       { cmd: "session_surf.picker.delete", label: "delete" },
       { cmd: "session_surf.picker.fork", label: "fork" },
+      { cmd: "session_surf.picker.new", label: "new" },
+      { cmd: "session_surf.picker.move", label: "switch workdir" },
     ];
-    const hintWidth = (h: { cmd: string; label: string }) => {
-      const { suffix } = splitKeybind(hintKey(h.cmd), h.label);
-      const inner = suffix === null ? hintKey(h.cmd).length + 1 + h.label.length : hintKey(h.cmd).length + suffix.length;
-      return inner + 3;
-    };
-    const hintRows = () => {
-      const total = pickerHints.reduce((n, h) => n + hintWidth(h), 0);
-      if (total <= contentWidth) return [pickerHints];
-      const half = Math.ceil(pickerHints.length / 2);
-      return [pickerHints.slice(0, half), pickerHints.slice(half)];
-    };
     const maxListHeight = Math.max(3, Math.min(20, (api.renderer.height > 20 ? api.renderer.height : 30) - 10));
     const listHeight = createMemo(() => Math.min(filtered().length * rowLines, maxListHeight));
     api.ui.dialog.replace(() => (
@@ -1213,13 +1208,9 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
             onSelect={switchTo}
           />
         </Show>
-        <For each={hintRows()}>
-          {(row) => (
-            <box flexDirection="row" paddingTop={1}>
-              <For each={row}>{(h) => hint(h.cmd, h.label)}</For>
-            </box>
-          )}
-        </For>
+        <box flexDirection="row" flexWrap="wrap" width="100%" paddingTop={1}>
+          <For each={pickerHints}>{(h) => hint(h.cmd, h.label)}</For>
+        </box>
       </box>
     ), unregister);
   };
@@ -1323,7 +1314,10 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
   function doMove(): void {
     const s = selected();
     if (!s) return;
-    close();
+    // unregister (not close): close() clears the whole dialog stack, which drops
+    // focus back to the main chat input. moveSessionDialog does its own in-place
+    // dialog.replace, so the workdir input keeps focus (mirrors doRename).
+    unregister();
     moveSessionDialog(api, s.id);
   }
 

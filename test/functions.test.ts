@@ -462,8 +462,11 @@ describe("splitKeybind", () => {
     expect(splitKeybind("ctrl+f", "fork")).toEqual({ key: "ctrl+f", suffix: "ork" });
     expect(splitKeybind("ctrl+d", "delete")).toEqual({ key: "ctrl+d", suffix: "elete" });
   });
-  test("a mid-word letter merges from its first occurrence", () => {
-    expect(splitKeybind("ctrl+e", "delete")).toEqual({ key: "ctrl+e", suffix: "lete" });
+  test("a mid-word letter keeps the spaced form", () => {
+    expect(splitKeybind("ctrl+e", "delete")).toEqual({ key: "ctrl+e", suffix: null });
+  });
+  test("a multi-word label keeps the spaced form even if the letter is inside a later word", () => {
+    expect(splitKeybind("ctrl+w", "switch workdir")).toEqual({ key: "ctrl+w", suffix: null });
   });
   test("keys without a plus keep the spaced form", () => {
     expect(splitKeybind("enter", "switch")).toEqual({ key: "enter", suffix: null });
