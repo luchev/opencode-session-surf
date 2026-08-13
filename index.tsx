@@ -1,6 +1,6 @@
 /// <reference path="./bun-sqlite.d.ts" />
 /** @jsxImportSource @opentui/solid */
-import { createMemo, createSignal, onCleanup, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, For, Show } from "solid-js";
 import type { TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui";
 import type { BoxRenderable } from "@opentui/core";
 import type { SessionStatus } from "@opencode-ai/sdk";
@@ -1057,6 +1057,18 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     return i >= 0 ? i : 0;
   })());
   const selected = () => filtered()[Math.min(index(), filtered().length - 1)];
+  // Starting a search (empty → non-empty query) jumps the highlight to the top
+  // of the results; afterwards only up/down move it. Clearing or changing the
+  // query never re-anchors to the current session.
+  let searchStarted = false;
+  createEffect(() => {
+    if (query() !== "") {
+      if (!searchStarted) setIndex(0);
+      searchStarted = true;
+    } else {
+      searchStarted = false;
+    }
+  });
   let unregisterLayer: (() => void) | undefined;
   const unregister = () => {
     unregisterLayer?.();
