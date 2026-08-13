@@ -210,6 +210,7 @@ type SidebarChild = {
   id: string;
   parentID: string;
   title: string;
+  updated: number;
 };
 
 let db: Database | undefined;
@@ -243,11 +244,11 @@ function dbSessions(): SidebarSession[] {
 function dbChildren(): SidebarChild[] {
   const rows = getDb()
     .query(
-      `SELECT id, parent_id, title FROM session
+      `SELECT id, parent_id, title, time_updated FROM session
        WHERE parent_id IS NOT NULL AND time_archived IS NULL`,
     )
-    .all() as { id: string; parent_id: string; title: string | null }[];
-  return rows.map((r) => ({ id: r.id, parentID: r.parent_id, title: r.title ?? "" }));
+    .all() as { id: string; parent_id: string; title: string | null; time_updated: number }[];
+  return rows.map((r) => ({ id: r.id, parentID: r.parent_id, title: r.title ?? "", updated: r.time_updated }));
 }
 
 export function relTime(ts: number, now = Date.now()): string {
@@ -545,6 +546,24 @@ export function ChildRow(props: {
   );
 }
 
+// A child row is shown while it's busy, waiting, or was active recently;
+// completed subagents that have been idle past the freshness window are
+// hidden — opencode never archives them, so the tree would fill up with
+// finished children otherwise. Status folding (foldChildBusy) still covers
+// hidden children.
+export function isChildVisible(
+  c: SidebarChild,
+  statuses: Map<string, SessionStatus>,
+  waitingIds: Set<string>,
+  now: number,
+): boolean {
+  return (
+    waitingIds.has(c.id) ||
+    isBusy(statuses.get(c.id)) ||
+    c.updated >= now - ACTIVE_MS
+  );
+}
+
 function SidebarSessions(props: {
   api: TuiPluginApi;
   session_id: string;
@@ -690,7 +709,7 @@ function SidebarSessions(props: {
 
   const renderKids = (s: SidebarSession) =>
     props.subagents === "tree" ? (
-      <For each={children.filter((c) => c.parentID === s.id)}>
+      <For each={children.filter((c) => c.parentID === s.id && isChildVisible(c, statuses(), waitingIds(), Date.now()))}>
         {(c) => (
           <ChildRow
             child={c}

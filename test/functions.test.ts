@@ -31,6 +31,7 @@ import {
   bySessionTitle,
   rowForeground,
   foldChildBusy,
+  isChildVisible,
 } from "../index.tsx";
 
 describe("centerScrollTop", () => {
@@ -221,7 +222,7 @@ describe("isBusy", () => {
 
 describe("foldChildBusy", () => {
   const status = (type: string) => ({ type }) as unknown as SessionStatus;
-  const child = (id: string, parentID: string) => ({ id, parentID, title: id });
+  const child = (id: string, parentID: string) => ({ id, parentID, title: id, updated: 0 });
   test("parent is busy while a direct child is busy", () => {
     const folded = foldChildBusy(
       new Map([["p", status("idle")], ["c", status("busy")]]),
@@ -264,6 +265,37 @@ describe("foldChildBusy", () => {
     // The unknown parent is marked busy too; it is never rendered, so this is
     // harmless — the point is the child's status survives folding.
     expect(folded.get("ghost")?.type).toBe("busy");
+  });
+});
+
+describe("isChildVisible", () => {
+  const status = (type: string) => ({ type }) as unknown as SessionStatus;
+  const NOW = 1_700_000_000_000;
+  const child = (id: string, updatedAgo: number) => ({ id, parentID: "p", title: id, updated: NOW - updatedAgo });
+
+  test("busy child is visible regardless of age", () => {
+    expect(
+      isChildVisible(child("c", 999_999_999), new Map([["c", status("busy")]]), new Set(), NOW),
+    ).toBe(true);
+  });
+  test("waiting child is visible regardless of age", () => {
+    expect(
+      isChildVisible(child("c", 999_999_999), new Map(), new Set(["c"]), NOW),
+    ).toBe(true);
+  });
+  test("recently-active idle child is visible", () => {
+    expect(
+      isChildVisible(child("c", 1_000), new Map([["c", status("idle")]]), new Set(), NOW),
+    ).toBe(true);
+  });
+  test("idle child idle past the freshness window is hidden", () => {
+    expect(
+      isChildVisible(child("c", 999_999_999), new Map([["c", status("idle")]]), new Set(), NOW),
+    ).toBe(false);
+  });
+  test("child without a status falls back to freshness", () => {
+    expect(isChildVisible(child("c", 999_999_999), new Map(), new Set(), NOW)).toBe(false);
+    expect(isChildVisible(child("c", 1_000), new Map(), new Set(), NOW)).toBe(true);
   });
 });
 

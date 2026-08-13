@@ -98,7 +98,9 @@ Subagent display is controlled by `subagents`:
   their own status spinner (waiting/working) and title; subagent rows have no
   time or directory and are clickable to open the subagent session. Busy state
   still folds up the tree, so a parent whose grandchild subagent is running
-  shows busy too.
+  shows busy too. Completed subagents drop off the list once they've been idle
+  past the freshness window — opencode never archives them, so without this
+  the tree would fill up with finished children.
 - **`collapsed`** — subagent sessions are hidden, but a session that
   spawned subagents stays busy while any of them (or their sub-subagents) is
   still running, so it never looks done mid-flight.
