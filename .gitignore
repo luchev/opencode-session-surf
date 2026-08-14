@@ -1,3 +1,5 @@
 node_modules/
 .omo/
 dist/
+.playwright-mcp/
+*.png
