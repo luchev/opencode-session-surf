@@ -33,7 +33,6 @@ import {
   foldChildBusy,
   isChildVisible,
   dedupeHiddenIds,
-  retryWait,
 } from "../index.tsx";
 
 describe("centerScrollTop", () => {
@@ -682,27 +681,6 @@ describe("bySessionTitle", () => {
   });
 });
 
-describe("retryWait", () => {
-  const NOW = 1_700_000_000_000;
-  const withNext = (next?: number) => ({ type: "idle", next }) as unknown as SessionStatus;
-
-  test("idle status with a future next returns the remaining wait", () => {
-    expect(retryWait(withNext(NOW + 60_000), NOW)).toBe(60_000);
-  });
-  test("idle status without next returns null", () => {
-    expect(retryWait(withNext(undefined), NOW)).toBeNull();
-  });
-  test("next in the past returns null", () => {
-    expect(retryWait(withNext(NOW - 1_000), NOW)).toBeNull();
-  });
-  test("undefined status returns null", () => {
-    expect(retryWait(undefined, NOW)).toBeNull();
-  });
-  test("busy status without next returns null", () => {
-    expect(retryWait({ type: "busy" } as unknown as SessionStatus, NOW)).toBeNull();
-  });
-});
-
 describe("rowForeground", () => {
   const theme = {
     text: "text",
@@ -713,20 +691,16 @@ describe("rowForeground", () => {
     success: "green",
   };
   test("focused session is always orange, even when working or asking", () => {
-    expect(rowForeground({ waiting: false, working: true, isCurrent: true, hasStatus: false, inActive: true, retrying: false }, theme)).toBe("orange");
-    expect(rowForeground({ waiting: true, working: false, isCurrent: true, hasStatus: false, inActive: true, retrying: false }, theme)).toBe("orange");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: true, hasStatus: false, inActive: true, retrying: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: false, working: true, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: true, working: false, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
   });
   test("other sessions keep their state colors", () => {
-    expect(rowForeground({ waiting: true, working: false, isCurrent: false, hasStatus: false, inActive: true, retrying: false }, theme)).toBe("purple");
-    expect(rowForeground({ waiting: false, working: true, isCurrent: false, hasStatus: false, inActive: true, retrying: false }, theme)).toBe("cyan");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: true, inActive: true, retrying: false }, theme)).toBe("green");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: true, retrying: false }, theme)).toBe("green");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: false, retrying: false }, theme)).toBe("text");
-  });
-  test("a session waiting on a retry shows the accent color", () => {
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: true, retrying: true }, theme)).toBe("purple");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: false, retrying: true }, theme)).toBe("purple");
+    expect(rowForeground({ waiting: true, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("purple");
+    expect(rowForeground({ waiting: false, working: true, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("cyan");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: true, inActive: true }, theme)).toBe("green");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("green");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: false }, theme)).toBe("text");
   });
 });
 

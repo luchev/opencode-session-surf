@@ -390,16 +390,6 @@ export function isBusy(status: SessionStatus | undefined): boolean {
   return status?.type === "busy" || status?.type === "retry";
 }
 
-// Milliseconds until a session's scheduled retry, or null when it is not
-// waiting on one. opencode emits retry metadata (attempt/message/next) on the
-// runtime status even when `type` is "idle" — e.g. a model quota block that
-// shows the session as done while it is actually waiting for the quota to
-// reset. The declared idle type has no fields, hence the cast.
-export function retryWait(status: SessionStatus | undefined, now = Date.now()): number | null {
-  const next = (status as { next?: number } | undefined)?.next;
-  return typeof next === "number" && next > now ? next - now : null;
-}
-
 // A session is shown busy while any of its subagent descendants is busy: the
 // parent's own status flips to idle the moment its message finishes, even
 // though a spawned subagent is still running. Children aren't list rows (in
@@ -433,23 +423,14 @@ type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" |
 
 // Foreground color for a sidebar row's title. The focused session is always
 // the primary (orange) color, whatever its state — busy/asking colors are for
-// other sessions only. Otherwise: asking → accent, retry-waiting → accent,
-// working → info, sessions with a status or idle-in-Active → success,
-// everything else → text.
+// other sessions only. Otherwise: asking → accent, working → info, sessions
+// with a status or idle-in-Active → success, everything else → text.
 export function rowForeground<T>(
-  s: {
-    waiting: boolean;
-    retrying: boolean;
-    working: boolean;
-    isCurrent: boolean;
-    hasStatus: boolean;
-    inActive: boolean;
-  },
+  s: { waiting: boolean; working: boolean; isCurrent: boolean; hasStatus: boolean; inActive: boolean },
   theme: { primary: T; accent: T; info: T; success: T; text: T; textMuted: T },
 ): T {
   if (s.isCurrent) return theme.primary;
   if (s.waiting) return theme.accent;
-  if (s.retrying) return theme.accent;
   if (s.working) return theme.info;
   if (s.hasStatus) return theme.success;
   // Idle sessions are green while in the Active section; nothing in Active is
@@ -468,7 +449,6 @@ export function SessionRow(props: {
   spinnerFrames: string[];
   waiting: () => boolean;
   working: () => boolean;
-  retrying: () => number | null;
   status: () => SessionStatus | undefined;
   theme: RowTheme;
   onNavigate: () => void;
@@ -479,7 +459,6 @@ export function SessionRow(props: {
     rowForeground(
       {
         waiting: props.waiting(),
-        retrying: props.retrying() !== null,
         working: props.working(),
         isCurrent: props.isCurrent,
         hasStatus: !!props.status(),
@@ -545,12 +524,6 @@ export function SessionRow(props: {
           {" "}
           {sessionTitle(props.s)}
         </text>
-        <Show when={props.retrying() !== null && !props.isCurrent}>
-          <text fg={props.theme.accent} wrapMode="none">
-            {" "}
-            [~{Math.round((props.retrying() ?? 0) / 60_000)}m]
-          </text>
-        </Show>
       </box>
       <text fg={props.theme.textMuted} wrapMode="none">
         {" "}
@@ -774,9 +747,7 @@ function SidebarSessions(props: {
         if (s.id === props.session_id) return true;
         const st = statuses().get(s.id);
         const fresh = s.time.updated >= Date.now() - ACTIVE_MS;
-        // Retry-waiting sessions (quota block etc.) are not done: keep them in
-        // Active so they don't sink to Recent looking finished.
-        return isBusy(st) || retryWait(st) !== null || isWaiting(s.id) || fresh;
+        return isBusy(st) || isWaiting(s.id) || fresh;
       })
       // by name, not recency: updates bump recency but must not reshuffle the list
       .sort(bySessionTitle),
@@ -827,7 +798,6 @@ function SidebarSessions(props: {
         spinnerFrames={props.spinner}
         waiting={() => isWaiting(s.id)}
         working={() => !isWaiting(s.id) && isBusy(statuses().get(s.id))}
-        retrying={() => retryWait(statuses().get(s.id))}
         status={() => statuses().get(s.id)}
         theme={theme}
         onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
@@ -1161,7 +1131,7 @@ type PickerDensity = "compact" | "comfortable";
 
 type PickerTheme = Pick<
   TuiThemeCurrent,
-  "text" | "textMuted" | "info" | "primary" | "success" | "error" | "accent" | "selectedListItemText"
+  "text" | "textMuted" | "info" | "primary" | "success" | "error" | "selectedListItemText"
 >;
 
 // The session list inside the picker. Renders only the visible window of rows,
@@ -1211,10 +1181,13 @@ export function PickerList(props: {
   };
   const rowColor = (s: SidebarSession) => {
     const st = props.statuses.get(s.id);
-    if (st === undefined) return props.theme.text;
-    // A retry-wait (quota block etc.) reads idle to isBusy but is not done.
-    if (retryWait(st) !== null) return props.theme.accent;
-    return isBusy(st) ? props.theme.info : st.type === "idle" ? props.theme.success : props.theme.error;
+    return st === undefined
+      ? props.theme.text
+      : isBusy(st)
+        ? props.theme.info
+        : st.type === "idle"
+          ? props.theme.success
+          : props.theme.error;
   };
   return (
     <box ref={attachMeasure} flexDirection="column" width="100%" height={props.height()}>
