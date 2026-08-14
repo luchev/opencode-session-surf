@@ -423,18 +423,19 @@ type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" |
 
 // Foreground color for a sidebar row's title. The focused session is always
 // the primary (orange) color, whatever its state — busy/asking colors are for
-// other sessions only. Otherwise: asking → accent, working → info, sessions
-// with a status or idle-in-Active → success, everything else → text.
+// other sessions only. Otherwise: asking → accent, working → info, idle rows
+// in the Active section → success (green), everything else (Recent) → text.
 export function rowForeground<T>(
-  s: { waiting: boolean; working: boolean; isCurrent: boolean; hasStatus: boolean; inActive: boolean },
+  s: { waiting: boolean; working: boolean; isCurrent: boolean; inActive: boolean },
   theme: { primary: T; accent: T; info: T; success: T; text: T; textMuted: T },
 ): T {
   if (s.isCurrent) return theme.primary;
   if (s.waiting) return theme.accent;
   if (s.working) return theme.info;
-  if (s.hasStatus) return theme.success;
-  // Idle sessions are green while in the Active section; nothing in Active is
-  // white. Recent rows use the default text color.
+  // Idle sessions are green while in the Active section; Recent rows use the
+  // default text color. Status presence does not matter — the statuses map
+  // covers every session in a running instance, so it can't distinguish
+  // Active from Recent.
   return s.inActive ? theme.success : theme.text;
 }
 
@@ -461,7 +462,6 @@ export function SessionRow(props: {
         waiting: props.waiting(),
         working: props.working(),
         isCurrent: props.isCurrent,
-        hasStatus: !!props.status(),
         inActive: props.inActive,
       },
       props.theme,

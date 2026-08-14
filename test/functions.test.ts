@@ -691,16 +691,20 @@ describe("rowForeground", () => {
     success: "green",
   };
   test("focused session is always orange, even when working or asking", () => {
-    expect(rowForeground({ waiting: false, working: true, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
-    expect(rowForeground({ waiting: true, working: false, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: true, hasStatus: false, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: false, working: true, isCurrent: true, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: true, working: false, isCurrent: true, inActive: true }, theme)).toBe("orange");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: true, inActive: true }, theme)).toBe("orange");
   });
   test("other sessions keep their state colors", () => {
-    expect(rowForeground({ waiting: true, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("purple");
-    expect(rowForeground({ waiting: false, working: true, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("cyan");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: true, inActive: true }, theme)).toBe("green");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: true }, theme)).toBe("green");
-    expect(rowForeground({ waiting: false, working: false, isCurrent: false, hasStatus: false, inActive: false }, theme)).toBe("text");
+    expect(rowForeground({ waiting: true, working: false, isCurrent: false, inActive: true }, theme)).toBe("purple");
+    expect(rowForeground({ waiting: false, working: true, isCurrent: false, inActive: true }, theme)).toBe("cyan");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, inActive: true }, theme)).toBe("green");
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, inActive: false }, theme)).toBe("text");
+  });
+  test("a session in Recent stays white even when it has a known status", () => {
+    // Status presence no longer colors rows — only Active placement does. A
+    // session that aged out of Active must not keep its green tint.
+    expect(rowForeground({ waiting: false, working: false, isCurrent: false, inActive: false }, theme)).toBe("text");
   });
 });
 
