@@ -386,6 +386,39 @@ export function bySessionTitle(a: SidebarSession, b: SidebarSession): number {
   );
 }
 
+// True when a session belongs in the sidebar's Active section: the focused
+// session always, anything busy/waiting, or updated within the freshness
+// window. Shared by the sidebar split and ctrl+x j/k navigation so both walk
+// the same ordering.
+export function isActiveSession(
+  s: SidebarSession,
+  statuses: Map<string, SessionStatus>,
+  waitingIds: Set<string>,
+  currentID: string | undefined,
+  now = Date.now(),
+): boolean {
+  if (s.id === currentID) return true;
+  const st = statuses.get(s.id);
+  return isBusy(st) || waitingIds.has(s.id) || s.time.updated >= now - ACTIVE_MS;
+}
+
+// The sidebar's full display order: Active sessions sorted by name, then
+// Recent sessions in recency order. ctrl+x j/k navigate this same sequence so
+// the highlight follows what's on screen.
+export function sidebarOrder(
+  sessions: SidebarSession[],
+  statuses: Map<string, SessionStatus>,
+  waitingIds: Set<string>,
+  currentID: string | undefined,
+  now = Date.now(),
+): SidebarSession[] {
+  const active = sessions.filter((s) => isActiveSession(s, statuses, waitingIds, currentID, now)).sort(bySessionTitle);
+  const activeIds = new Set(active.map((s) => s.id));
+  const recentIds = new Set(recentSessions(sessions, now).map((s) => s.id));
+  const recent = sessions.filter((s) => !activeIds.has(s.id) && recentIds.has(s.id));
+  return [...active, ...recent];
+}
+
 export function isBusy(status: SessionStatus | undefined): boolean {
   return status?.type === "busy" || status?.type === "retry";
 }
@@ -740,24 +773,17 @@ function SidebarSessions(props: {
     watcher?.close();
   });
 
+  // Display order: Active (name-sorted) then Recent (recency) — the same
+  // sequence ctrl+x j/k navigates, so the highlight follows the sidebar.
+  const ordered = createMemo(() =>
+    sidebarOrder(sessions(), statuses(), waitingIds(), props.session_id),
+  );
   const active = createMemo(() =>
-    sessions()
-      .filter((s) => {
-        // the session you're in is always Active, regardless of status/freshness
-        if (s.id === props.session_id) return true;
-        const st = statuses().get(s.id);
-        const fresh = s.time.updated >= Date.now() - ACTIVE_MS;
-        return isBusy(st) || isWaiting(s.id) || fresh;
-      })
-      // by name, not recency: updates bump recency but must not reshuffle the list
-      .sort(bySessionTitle),
+    ordered().filter((s) => isActiveSession(s, statuses(), waitingIds(), props.session_id)),
   );
   const activeIds = createMemo(() => new Set(active().map((s) => s.id)));
 
-  const recent = createMemo(() => {
-    const ids = new Set(recentSessions(sessions(), Date.now()).map((s) => s.id));
-    return sessions().filter((s) => !activeIds().has(s.id) && ids.has(s.id));
-  });
+  const recent = createMemo(() => ordered().filter((s) => !activeIds().has(s.id)));
 
   // Recomputed on refresh changes (children is refilled in refresh() alongside
   // setSessions, so depending on sessions is enough).
@@ -858,11 +884,26 @@ function currentSessionID(api: TuiPluginApi): string | undefined {
 }
 
 function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
-  const list = dbSessions();
-  if (list.length === 0) return;
+  const sessions = dbSessions();
+  if (sessions.length === 0) return;
   const currentID = currentSessionID(api);
-  const idx = list.findIndex((s) => s.id === currentID);
-  const next = list[((idx === -1 ? 0 : idx) + delta + list.length) % list.length];
+  // Same ordering the sidebar shows (Active name-sorted, then Recent), so
+  // ctrl+x j/k follow what's on screen instead of raw recency.
+  const statuses = new Map<string, SessionStatus>();
+  const waitingIds = new Set<string>();
+  for (const s of sessions) {
+    const st = api.state.session.status(s.id);
+    if (st) statuses.set(s.id, st);
+    if (
+      api.state.session.question(s.id).length > 0 ||
+      api.state.session.permission(s.id).length > 0
+    ) {
+      waitingIds.add(s.id);
+    }
+  }
+  const order = sidebarOrder(sessions, statuses, waitingIds, currentID);
+  const idx = order.findIndex((s) => s.id === currentID);
+  const next = order[((idx === -1 ? 0 : idx) + delta + order.length) % order.length];
   if (next) api.route.navigate("session", { sessionID: next.id });
 }
 

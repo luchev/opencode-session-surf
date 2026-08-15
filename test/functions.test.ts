@@ -29,6 +29,7 @@ import {
   setSessionDirectory,
   splitKeybind,
   bySessionTitle,
+  sidebarOrder,
   rowForeground,
   foldChildBusy,
   isChildVisible,
@@ -678,6 +679,88 @@ describe("bySessionTitle", () => {
   test("empty display names fall back to the directory basename", () => {
     const list = [s("a", "", "/work/zzz"), s("b", "", "/work/aaa")];
     expect([...list].sort(bySessionTitle).map((x) => x.id)).toEqual(["b", "a"]);
+  });
+});
+
+describe("sidebarOrder", () => {
+  // 2023-11-13 16:00 Monday; ACTIVE_MS = 15min so sessions from 15:45+ are fresh.
+  const NOW = Date.UTC(2023, 10, 13, 16, 0, 0);
+  const fresh = Date.UTC(2023, 10, 13, 15, 50, 0);
+  const stale = Date.UTC(2023, 10, 12, 9, 0, 0); // yesterday, outside recent blocks
+  const mk = (id: string, updated: number) => ({
+    id,
+    projectID: "p",
+    directory: "/x",
+    title: id,
+    time: { created: 0, updated },
+  });
+  const status = (type: string) => ({ type }) as unknown as SessionStatus;
+  const ids = (order: SidebarSession[]) => order.map((s) => s.id);
+
+  test("active sessions come first sorted by name, recent after", () => {
+    const order = sidebarOrder(
+      [mk("zeta", stale), mk("alpha", fresh), mk("mid", fresh)],
+      new Map(),
+      new Set(),
+      undefined,
+      NOW,
+    );
+    expect(ids(order)).toEqual(["alpha", "mid", "zeta"]);
+  });
+  test("busy session stays active even when old", () => {
+    const old = mk("busy-old", stale);
+    const order = sidebarOrder(
+      [old, mk("idle-fresh", fresh)],
+      new Map([["busy-old", status("busy")]]),
+      new Set(),
+      undefined,
+      NOW,
+    );
+    expect(ids(order)).toEqual(["busy-old", "idle-fresh"]);
+  });
+  test("current session is included in active even when stale, still name-sorted", () => {
+    const order = sidebarOrder(
+      [mk("stale", stale), mk("other", fresh)],
+      new Map(),
+      new Set(),
+      "stale",
+      NOW,
+    );
+    expect(ids(order)).toEqual(["other", "stale"]);
+  });
+  test("waiting session is active regardless of age, name-sorted", () => {
+    const order = sidebarOrder(
+      [mk("waiting-old", stale), mk("fresh", fresh)],
+      new Map(),
+      new Set(["waiting-old"]),
+      undefined,
+      NOW,
+    );
+    expect(ids(order)).toEqual(["fresh", "waiting-old"]);
+  });
+  test("sessions outside recent blocks are excluded entirely", () => {
+    const order = sidebarOrder(
+      [
+        mk("ancient", Date.UTC(2023, 9, 1, 0, 0, 0)),
+        mk("mid", Date.UTC(2023, 10, 12, 10, 0, 0)),
+        mk("fresh", fresh),
+      ],
+      new Map(),
+      new Set(),
+      undefined,
+      NOW,
+    );
+    expect(ids(order)).toEqual(["fresh", "mid"]);
+  });
+  test("active section ignores recency ordering (name wins)", () => {
+    const order = sidebarOrder(
+      [mk("newest", fresh), mk("older", Date.UTC(2023, 10, 13, 15, 46, 0))],
+      new Map(),
+      new Set(),
+      undefined,
+      NOW,
+    );
+    expect(ids(order)).toEqual(["newest", "older"]);
   });
 });
 
