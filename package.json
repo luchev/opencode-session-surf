@@ -1,6 +1,6 @@
 {
   "name": "opencode-session-surf",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Session list sidebar plugin for opencode TUI with cross-instance status sync and fuzzy session switching",
   "license": "MIT",
   "repository": {
