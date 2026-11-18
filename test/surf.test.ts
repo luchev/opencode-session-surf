@@ -258,6 +258,17 @@ describe("createSurfState", () => {
     state.dispose();
   });
 
+  test("Recent starts collapsed and Active open, and a toggle persists", () => {
+    const { ctx } = fakeContext({ pages: [page([])] });
+    const state = createSurfState(ctx, { pollMs: 60_000 });
+    expect([...state.collapsed()]).toEqual(["recent"]);
+    state.toggleCollapsed("recent");
+    expect(state.collapsed().has("recent")).toBe(false);
+    state.toggleCollapsed("active");
+    expect([...state.collapsed()]).toEqual(["active"]);
+    state.dispose();
+  });
+
   test("dispose unsubscribes every event handler and removes the status file", async () => {
     const { ctx, handlers } = fakeContext({ pages: [page([info("a")])] });
     const state = createSurfState(ctx, { pollMs: 60_000 });

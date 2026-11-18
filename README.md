@@ -177,7 +177,7 @@ The picker itself has its own actions, also configurable through the same
 | Fork selected session | `ctrl+f` | `session_surf.picker.fork` |
 | Move selected session | `ctrl+w` | `session_surf.picker.move` |
 | New session | `ctrl+n` | `session_surf.picker.new` |
-| Close the picker | `escape` | `session_surf.picker.close` |
+| Close the picker | `escape`, `ctrl+o` | `session_surf.picker.close` |
 
 Selection wraps around both ends. Rename and delete keep the picker open (a
 confirmation prompt appears first, and rename shows the new title

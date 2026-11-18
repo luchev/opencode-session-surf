@@ -757,6 +757,8 @@ export type SurfState = {
   waitingIds: () => Set<string>;
   loading: () => boolean;
   error: () => string | null;
+  collapsed: () => Set<string>;
+  toggleCollapsed: (key: string) => void;
   refresh: () => Promise<void>;
   commit: () => void;
   dispose: () => void;
@@ -788,6 +790,18 @@ export function createSurfState(ctx: Context, cfg: { pollMs: number }): SurfStat
   const [error, setError] = createSignal<string | null>(null);
   const [statuses, setStatuses] = createSignal<Map<string, SessionStatus>>(new Map());
   const [waitingIds, setWaitingIds] = createSignal<Set<string>>(new Set());
+  // Sidebar section state lives here, not in the sidebar component, so a toggle
+  // survives switching sessions (the sidebar remounts per session). Recent
+  // starts collapsed; Active starts open.
+  const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set(["recent"]));
+  const toggleCollapsed = (key: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   // Statuses learned from "session.status" events. data.session.status only
   // distinguishes idle/running, so retry details and known-idle come from here.
@@ -899,6 +913,8 @@ export function createSurfState(ctx: Context, cfg: { pollMs: number }): SurfStat
     waitingIds,
     loading,
     error,
+    collapsed,
+    toggleCollapsed,
     refresh,
     commit,
     dispose() {
@@ -926,20 +942,12 @@ function SidebarSessions(props: {
 }) {
   const theme = palette(props.ctx.theme);
   const { state } = props;
-  const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
+  const { collapsed } = state;
 
   const isWaiting = (id: string) => state.waitingIds().has(id);
 
-  const toggleCollapsed = (key: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  };
   const header = (key: string, label: string) => (
-    <box paddingLeft={1} paddingTop={1} onMouseDown={() => toggleCollapsed(key)}>
+    <box paddingLeft={1} paddingTop={1} onMouseDown={() => state.toggleCollapsed(key)}>
       <text fg={theme.textMuted}>
         {collapsed().has(key) ? "▶" : "▼"} {label}
       </text>
@@ -1539,7 +1547,7 @@ function PickerView(props: {
       { id: "session_surf.picker.new", title: "New session", bind: "ctrl+n", run: doNew },
       { id: "session_surf.picker.up", title: "Move up", bind: "up,ctrl+k", run: () => setIndex((i) => wrapIndex(i, -1, filtered().length)) },
       { id: "session_surf.picker.down", title: "Move down", bind: "down,ctrl+j", run: () => setIndex((i) => wrapIndex(i, 1, filtered().length)) },
-      { id: "session_surf.picker.close", title: "Close picker", bind: "escape", run: close },
+      { id: "session_surf.picker.close", title: "Close picker", bind: "escape,ctrl+o", run: close },
     ],
   }));
 
