@@ -1,6 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import type { SessionStatus } from "@opencode-ai/sdk";
+import type { SessionStatus } from "@opencode/client";
 import stringWidth from "string-width";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -26,7 +25,6 @@ import {
   forkTitle,
   expandPath,
   completePath,
-  setSessionDirectory,
   splitKeybind,
   bySessionTitle,
   sidebarOrder,
@@ -34,7 +32,8 @@ import {
   foldChildBusy,
   isChildVisible,
   dedupeHiddenIds,
-} from "../index.tsx";
+  type SidebarSession,
+} from "../tui.tsx";
 
 describe("centerScrollTop", () => {
   const visible = 10;
@@ -788,34 +787,5 @@ describe("rowForeground", () => {
     // Status presence no longer colors rows — only Active placement does. A
     // session that aged out of Active must not keep its green tint.
     expect(rowForeground({ waiting: false, working: false, isCurrent: false, inActive: false }, theme)).toBe("text");
-  });
-});
-
-describe("setSessionDirectory", () => {
-  const sessionTable = (db: Database) => {
-    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT)");
-    db.exec("INSERT INTO session (id, directory) VALUES ('ses_a', '/old/dir')");
-  };
-  test("updates the directory of an existing session row", () => {
-    const db = new Database(":memory:");
-    sessionTable(db);
-    const res = setSessionDirectory("ses_a", "/new/dir", db);
-    expect(res).toEqual({ ok: true });
-    const row = db.query("SELECT directory FROM session WHERE id = ?").get("ses_a") as { directory: string };
-    expect(row.directory).toBe("/new/dir");
-    db.close();
-  });
-  test("returns schema when the session table has no directory column", () => {
-    const db = new Database(":memory:");
-    db.exec("CREATE TABLE session (id TEXT PRIMARY KEY)");
-    db.exec("INSERT INTO session (id) VALUES ('ses_a')");
-    expect(setSessionDirectory("ses_a", "/new/dir", db)).toEqual({ ok: false, reason: "schema" });
-    db.close();
-  });
-  test("returns db when the update throws", () => {
-    const db = new Database(":memory:");
-    sessionTable(db);
-    db.close();
-    expect(setSessionDirectory("ses_a", "/new/dir", db)).toEqual({ ok: false, reason: "db" });
   });
 });

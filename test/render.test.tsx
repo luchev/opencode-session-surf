@@ -1,11 +1,12 @@
 /** @jsxImportSource @opentui/solid */
 import { describe, expect, test } from "bun:test";
 import { testRender } from "@opentui/solid";
-import type { SessionStatus } from "@opencode-ai/sdk";
-import { registerSpinner } from "opentui-spinner/solid";
-import { PickerList, SessionRow, ChildRow, SPINNERS, WAITERS } from "../index.tsx";
+import type { JSX } from "@opentui/solid";
+import type { SessionStatus } from "@opencode/client";
+import { registerSpinnerShim } from "./spinner-shim.ts";
+import { PickerList, SessionRow, ChildRow, SPINNERS, WAITERS } from "../tui.tsx";
 
-registerSpinner();
+registerSpinnerShim();
 
 const session = {
   id: "ses_123",
@@ -24,7 +25,7 @@ const theme = {
 } as unknown as Parameters<typeof SessionRow>[0]["theme"];
 const status = (type: string) => ({ type }) as unknown as SessionStatus;
 
-async function frameFor(node: () => unknown): Promise<string> {
+async function frameFor(node: () => JSX.Element): Promise<string> {
   const t = await testRender(node, { width: 60, height: 3 });
   await t.renderOnce();
   return t.captureCharFrame();

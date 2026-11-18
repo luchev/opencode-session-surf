@@ -1,7 +1,7 @@
 {
   "name": "opencode-session-surf",
-  "version": "0.1.7",
-  "description": "Session list sidebar plugin for opencode TUI with cross-instance status sync and fuzzy session switching",
+  "version": "0.2.0",
+  "description": "Session list sidebar plugin for the opencode TUI (v2) with cross-instance status sync and fuzzy session switching",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -9,19 +9,16 @@
   },
   "type": "module",
   "exports": {
-    "./tui": {
-      "types": "./dist/index.d.ts",
-      "import": "./index.tsx"
-    }
+    "./tui": "./tui.tsx"
   },
   "files": [
-    "dist"
+    "tui.tsx",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid && cp index.d.ts dist/",
-    "dev": "bun build ./index.tsx --outdir dist --target=bun --external @opencode-ai/plugin --external @opencode-ai/sdk --external solid-js --external @opentui/core --external @opentui/solid --watch",
-    "prepublishOnly": "bun run build",
-    "test": "bun test --preload @opentui/solid/preload"
+    "test": "bun test --preload @opentui/solid/preload",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "opencode",
@@ -31,14 +28,21 @@
     "sidebar"
   ],
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.15",
-    "@opencode-ai/sdk": "1.18.15",
-    "@opentui/core": "0.4.5",
-    "@opentui/solid": "0.4.5",
-    "solid-js": "^1.9.12"
+    "@opencode/plugin": "2.2.0"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.6.6",
+    "@opentui/solid": ">=0.6.6",
+    "solid-js": ">=1.9.0"
   },
   "devDependencies": {
-    "opentui-spinner": "^0.0.7",
+    "@opencode/client": "2.2.0",
+    "@opencode/theme": "2.2.0",
+    "@opentui/core": "0.7.0",
+    "@opentui/solid": "0.7.0",
+    "@types/bun": "latest",
+    "solid-js": "1.9.12",
+    "string-width": "^7.2.0",
     "typescript": "^5.9.3"
   }
 }

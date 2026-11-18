@@ -1,13 +1,25 @@
-/// <reference path="./bun-sqlite.d.ts" />
 /** @jsxImportSource @opentui/solid */
 import { createEffect, createMemo, createSignal, onCleanup, For, Show } from "solid-js";
-import type { TuiPluginApi, TuiPluginModule, TuiThemeCurrent } from "@opencode-ai/plugin/tui";
+import { Plugin } from "@opencode/plugin/tui";
+import type { SessionInfo, SessionStatus } from "@opencode/client";
+import type { ResolvedTheme } from "@opencode/theme/tui";
 import type { BoxRenderable } from "@opentui/core";
-import type { SessionStatus } from "@opencode-ai/sdk";
-import { Database } from "bun:sqlite";
-import { mkdirSync, readdirSync, readFileSync, appendFileSync, realpathSync, statSync, watch as fsWatch, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  appendFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  watch as fsWatch,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+
+type Context = Plugin.Context;
 
 const POLL_MS = 3_000;
 // A "work block" window: Recent shows the last BLOCK_MS of work plus the
@@ -102,7 +114,6 @@ const ACTIVE_MS = 15 * 60 * 1000;
 // How long a completed subagent row stays visible after going idle (freshness
 // window for children; tunable via childTtlMs).
 const CHILD_TTL_MS = 10 * 1000;
-const DB_PATH = `${process.env.HOME ?? ""}/.local/share/opencode/opencode.db`;
 
 // Cross-instance busy-status broadcast: each opencode process writes its own
 // locally-known session statuses to a pid-named file in the OS temp dir, so
@@ -130,28 +141,35 @@ function ensureStatusDir(): void {
   } catch {}
 }
 
-function writeOwnStatuses(map: Map<string, SessionStatus>, waiting: string[]): void {
+// Written to a temp name and renamed into place so another instance never
+// reads a half-written file.
+export function writeOwnStatuses(map: Map<string, SessionStatus>, waiting: string[], dir = STATUS_DIR): void {
   try {
-    ensureStatusDir();
-    const file = join(STATUS_DIR, `${process.pid}.json`);
-    writeFileSync(
-      file,
-      JSON.stringify({ updated: Date.now(), statuses: Object.fromEntries(map), waiting }),
-    );
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${process.pid}.json`);
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ updated: Date.now(), statuses: Object.fromEntries(map), waiting }));
+    renameSync(tmp, file);
   } catch {}
 }
 
-type RemoteBroadcast = { statuses: Map<string, SessionStatus>; waiting: string[] };
-
-function readCrossInstance(staleMs = STALE_MS): RemoteBroadcast[] {
+function removeOwnStatuses(dir = STATUS_DIR): void {
   try {
-    ensureStatusDir();
+    unlinkSync(join(dir, `${process.pid}.json`));
+  } catch {}
+}
+
+export type RemoteBroadcast = { statuses: Map<string, SessionStatus>; waiting: string[] };
+
+export function readCrossInstance(staleMs = STALE_MS, dir = STATUS_DIR): RemoteBroadcast[] {
+  try {
+    mkdirSync(dir, { recursive: true });
     const ownFile = `${process.pid}.json`;
-    const files = readdirSync(STATUS_DIR).filter((f: string) => f.endsWith(".json") && f !== ownFile);
+    const files = readdirSync(dir).filter((f: string) => f.endsWith(".json") && f !== ownFile);
     const out: RemoteBroadcast[] = [];
     for (const f of files) {
       try {
-        const raw = JSON.parse(readFileSync(join(STATUS_DIR, f), "utf8")) as {
+        const raw = JSON.parse(readFileSync(join(dir, f), "utf8")) as {
           updated?: number;
           statuses?: Record<string, SessionStatus>;
           waiting?: string[];
@@ -168,7 +186,7 @@ function readCrossInstance(staleMs = STALE_MS): RemoteBroadcast[] {
 
 // Union of busy signals: a session shows busy if ANY live instance reports it
 // busy, without letting other instances' idle knowledge override local truth.
-function mergeBusy(local: Map<string, SessionStatus>, remotes: RemoteBroadcast[]): Map<string, SessionStatus> {
+export function mergeBusy(local: Map<string, SessionStatus>, remotes: RemoteBroadcast[]): Map<string, SessionStatus> {
   const merged = new Map(local);
   for (const remote of remotes) {
     for (const [id, status] of remote.statuses) {
@@ -182,23 +200,13 @@ function mergeBusy(local: Map<string, SessionStatus>, remotes: RemoteBroadcast[]
 // question/permission answer only ever reports as "busy" to other processes.
 // So waiting ids must be broadcast and unioned separately, or a session
 // waiting for input in one terminal shows as merely "working" everywhere else.
-function mergeWaiting(local: string[], remotes: RemoteBroadcast[]): Set<string> {
+export function mergeWaiting(local: string[], remotes: RemoteBroadcast[]): Set<string> {
   const merged = new Set(local);
   for (const remote of remotes) for (const id of remote.waiting) merged.add(id);
   return merged;
 }
 
-type DbRow = {
-  id: string;
-  project_id: string;
-  directory: string;
-  parent_id: string | null;
-  title: string;
-  time_created: number;
-  time_updated: number;
-};
-
-type SidebarSession = {
+export type SidebarSession = {
   id: string;
   projectID: string;
   directory: string;
@@ -212,7 +220,7 @@ type SidebarSession = {
 // `created` distinguishes retry duplicates (the fallback retry is always
 // created after the failed attempt); `updated` is unreliable for that because
 // the failure event bumps it after the retry already exists.
-type SidebarChild = {
+export type SidebarChild = {
   id: string;
   parentID: string;
   title: string;
@@ -220,54 +228,64 @@ type SidebarChild = {
   updated: number;
 };
 
-let db: Database | undefined;
-function getDb(): Database {
-  if (!db) db = new Database(DB_PATH, { readonly: true });
-  return db;
+// Roots (non-archived, non-subagent sessions, newest first) and every subagent
+// child, mapped from the v2 session list into the shapes the sidebar renders.
+export function toSidebarData(
+  infos: readonly SessionInfo[],
+  maxRoots = 100,
+): { roots: SidebarSession[]; children: SidebarChild[] } {
+  const roots: SidebarSession[] = [];
+  const children: SidebarChild[] = [];
+  for (const info of infos) {
+    if (info.time.archived !== undefined) continue;
+    if (info.parentID) {
+      children.push({
+        id: info.id,
+        parentID: info.parentID,
+        title: info.title ?? "",
+        created: info.time.created,
+        updated: info.time.updated,
+      });
+    } else {
+      roots.push({
+        id: info.id,
+        projectID: info.projectID,
+        directory: info.location.directory,
+        title: info.title ?? "",
+        time: { created: info.time.created, updated: info.time.updated },
+      });
+    }
+  }
+  roots.sort((a, b) => b.time.updated - a.time.updated);
+  return { roots: roots.slice(0, maxRoots), children };
 }
 
-function dbSessions(): SidebarSession[] {
-  const rows = getDb()
-    .query(
-      `SELECT id, project_id, directory, parent_id, title, time_created, time_updated
-       FROM session
-       WHERE parent_id IS NULL AND time_archived IS NULL
-       ORDER BY time_updated DESC
-       LIMIT 100`,
-    )
-    .all() as DbRow[];
-  return rows.map((r) => ({
-    id: r.id,
-    projectID: r.project_id,
-    directory: r.directory,
-    parentID: r.parent_id ?? undefined,
-    title: r.title,
-    time: { created: r.time_created, updated: r.time_updated },
-  }));
-}
-
-// All subagent (child) sessions — children of the rows above, plus deeper
-// generations (a subagent's own subagents), so status can fold up the tree.
-function dbChildren(): SidebarChild[] {
-  const rows = getDb()
-    .query(
-      `SELECT id, parent_id, title, time_created, time_updated FROM session
-       WHERE parent_id IS NOT NULL AND time_archived IS NULL`,
-    )
-    .all() as {
-    id: string;
-    parent_id: string;
-    title: string | null;
-    time_created: number;
-    time_updated: number;
-  }[];
-  return rows.map((r) => ({
-    id: r.id,
-    parentID: r.parent_id,
-    title: r.title ?? "",
-    created: r.time_created,
-    updated: r.time_updated,
-  }));
+// Pages through the session list, newest first, until `maxRoots` root sessions
+// have been collected, the list ends, or `maxPages` pages were read. Children
+// come along on the same pages so status can fold up the subagent tree.
+export async function fetchAllSessions(
+  client: Context["client"],
+  maxRoots = 100,
+  maxPages = 5,
+): Promise<SessionInfo[]> {
+  const out: SessionInfo[] = [];
+  let cursor: string | undefined;
+  let roots = 0;
+  for (let page = 0; page < maxPages; page++) {
+    const res = await client.session.list(
+      cursor === undefined
+        ? { order: "desc", limit: 200, archived: false }
+        : { limit: 200, archived: false, cursor },
+    );
+    for (const info of res.data) {
+      out.push(info);
+      if (!info.parentID) roots++;
+    }
+    const next = res.cursor.next;
+    if (!next || roots >= maxRoots) break;
+    cursor = String(next);
+  }
+  return out;
 }
 
 export function relTime(ts: number, now = Date.now()): string {
@@ -452,7 +470,56 @@ export function foldChildBusy(
   return folded;
 }
 
-type RowTheme = Pick<TuiThemeCurrent, "text" | "textMuted" | "accent" | "info" | "primary" | "success">;
+type Color = ResolvedTheme["text"]["base"];
+
+// The handful of theme colors the plugin uses, under flat names. Getters, not a
+// snapshot: theme switches stay reactive wherever a field is read in a
+// computation or JSX. Exported for testing.
+export type Palette = {
+  readonly text: Color;
+  readonly textMuted: Color;
+  readonly accent: Color;
+  readonly info: Color;
+  readonly primary: Color;
+  readonly success: Color;
+  readonly error: Color;
+  readonly selectedListItemText: Color;
+  readonly selectedBg: Color;
+};
+
+export function palette(t: ResolvedTheme): Palette {
+  return {
+    get text() {
+      return t.text.base;
+    },
+    get textMuted() {
+      return t.text.muted;
+    },
+    get accent() {
+      return t.hue.accent[200];
+    },
+    get info() {
+      return t.text.feedback.info.base;
+    },
+    get primary() {
+      return t.text.action.primary.base;
+    },
+    get success() {
+      return t.text.feedback.success.base;
+    },
+    get error() {
+      return t.text.feedback.error.base;
+    },
+    get selectedListItemText() {
+      return t.text.action.primary.selected;
+    },
+    get selectedBg() {
+      return t.background.action.primary.selected;
+    },
+  };
+}
+
+type RowTheme = Pick<Palette, "text" | "textMuted" | "accent" | "info" | "primary" | "success">;
 
 // Foreground color for a sidebar row's title. The focused session is always
 // the primary (orange) color, whatever its state — busy/asking colors are for
@@ -648,107 +715,220 @@ export function dedupeHiddenIds(children: SidebarChild[]): Set<string> {
   return hidden;
 }
 
-function SidebarSessions(props: {
-  api: TuiPluginApi;
-  session_id: string;
-  spinner: string[];
-  waiting: string[];
-  marker: string;
-  pollMs: number;
-  openElsewhere: boolean;
-  combined: boolean;
-  subagents: "collapsed" | "tree";
-  childTtl: number;
-}) {
-  const theme = props.api.theme.current;
-  const [sessions, setSessions] = createSignal<SidebarSession[]>([]);
-  // Subagent sessions: hidden rows in "collapsed" mode (still folded into
-  // parent status), shown as indented rows in "tree" mode.
-  let children: SidebarChild[] = [];
+// Which sessions are blocked on a human: an open permission request or form
+// (questions are forms in v2). Keyed by session, holding the pending request
+// IDs, so two outstanding requests need two replies. Returns a new map.
+export type WaitingState = Map<string, Set<string>>;
+
+export function applyWaitingEvent(state: WaitingState, event: { type: string; data: any }): WaitingState {
+  const next: WaitingState = new Map([...state].map(([k, v]) => [k, new Set(v)]));
+  const add = (sessionID: string, id: string) => {
+    const set = next.get(sessionID);
+    if (set) set.add(id);
+    else next.set(sessionID, new Set([id]));
+  };
+  const remove = (id: string) => {
+    for (const [sessionID, set] of next) {
+      if (set.delete(id) && set.size === 0) next.delete(sessionID);
+    }
+  };
+  switch (event.type) {
+    case "permission.asked":
+      add(String(event.data.sessionID), String(event.data.id));
+      break;
+    case "permission.replied":
+      remove(String(event.data.requestID));
+      break;
+    case "form.created":
+      add(String(event.data.form.sessionID), String(event.data.form.id));
+      break;
+    case "form.replied":
+    case "form.cancelled":
+      remove(String(event.data.id));
+      break;
+  }
+  return next;
+}
+
+export type SurfState = {
+  roots: () => SidebarSession[];
+  children: () => SidebarChild[];
+  statuses: () => Map<string, SessionStatus>;
+  waitingIds: () => Set<string>;
+  loading: () => boolean;
+  error: () => string | null;
+  refresh: () => Promise<void>;
+  commit: () => void;
+  dispose: () => void;
+};
+
+const LIFECYCLE_EVENTS = [
+  "session.created",
+  "session.renamed",
+  "session.deleted",
+  "session.moved",
+  "session.archived",
+  "session.unarchived",
+  "session.forked",
+  "session.execution.started",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+] as const;
+
+const REFRESH_DEBOUNCE_MS = 250;
+
+// The one place session data and status live. The sidebar, the picker and the
+// next/previous commands all read from it, so there is a single poll timer,
+// a single event subscription set and a single status broadcast per TUI.
+export function createSurfState(ctx: Context, cfg: { pollMs: number }): SurfState {
+  const [roots, setRoots] = createSignal<SidebarSession[]>([]);
+  const [children, setChildren] = createSignal<SidebarChild[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal<string | null>(null);
   const [statuses, setStatuses] = createSignal<Map<string, SessionStatus>>(new Map());
   const [waitingIds, setWaitingIds] = createSignal<Set<string>>(new Set());
-  const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
 
-  const sessionIds = () => [...sessions().map((s) => s.id), ...children.map((c) => c.id)];
+  // Statuses learned from "session.status" events. data.session.status only
+  // distinguishes idle/running, so retry details and known-idle come from here.
+  const eventStatus = new Map<string, SessionStatus>();
+  let waiting: WaitingState = new Map();
+  let localStatuses = new Map<string, SessionStatus>();
+  let localWaiting: string[] = [];
+  let inFlight = false;
+  let pending = false;
+  let disposed = false;
+  let debounce: ReturnType<typeof setTimeout> | undefined;
 
-  async function refresh() {
+  const statusOf = (id: string): SessionStatus | undefined =>
+    eventStatus.get(id) ?? (ctx.data.session.status(id) === "running" ? { type: "busy" } : undefined);
+
+  const recompute = (remotes: RemoteBroadcast[]) => {
+    setStatuses(foldChildBusy(mergeBusy(localStatuses, remotes), children()));
+    setWaitingIds(mergeWaiting(localWaiting, remotes));
+  };
+
+  function commit(): void {
+    if (disposed) return;
+    const ids = [...roots().map((s) => s.id), ...children().map((c) => c.id)];
+    const local = new Map<string, SessionStatus>();
+    for (const id of ids) {
+      const st = statusOf(id);
+      if (st) local.set(id, st);
+    }
+    localStatuses = foldChildBusy(local, children());
+    localWaiting = ids.filter(
+      (id) =>
+        (waiting.get(id)?.size ?? 0) > 0 ||
+        (ctx.data.session.permission.list(id)?.length ?? 0) > 0 ||
+        (ctx.data.session.form.list(id)?.length ?? 0) > 0,
+    );
+    writeOwnStatuses(localStatuses, localWaiting);
+    const remotes = readCrossInstance(cfg.pollMs * 3);
+    recompute(remotes);
+    debugLog(`statuses busy=${[...statuses().values()].filter(isBusy).length} waiting=${waitingIds().size}`);
+  }
+
+  // One request at a time: a refresh asked for while another is running runs
+  // once more afterwards, so responses can never be applied out of order.
+  async function refresh(): Promise<void> {
+    if (disposed) return;
+    if (inFlight) {
+      pending = true;
+      return;
+    }
+    inFlight = true;
     try {
-      setSessions(dbSessions());
-      children = dbChildren();
-      setError(null);
+      const data = toSidebarData(await fetchAllSessions(ctx.client));
+      if (!disposed) {
+        setRoots(data.roots);
+        setChildren(data.children);
+        setError(null);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       debugLog(`refresh error: ${String(e)}`);
     } finally {
       setLoading(false);
+      inFlight = false;
     }
-    props.api.renderer.requestRender();
-  }
-
-  // `state.session.status` is the host TUI's own synchronous, always-fresh
-  // per-session status (same family as state.session.question/permission),
-  // unlike the async bulk client.session.status() RPC which was found to
-  // miss/lag the process's own foreground session.
-  function localStatusesFromState(): Map<string, SessionStatus> {
-    const m = new Map<string, SessionStatus>();
-    for (const id of sessionIds()) {
-      const st = props.api.state.session.status(id);
-      if (st) m.set(id, st);
+    commit();
+    if (pending && !disposed) {
+      pending = false;
+      await refresh();
     }
-    return m;
   }
 
-  function localWaitingIds(): string[] {
-    return sessionIds()
-      .filter(
-        (id) =>
-          props.api.state.session.question(id).length > 0 ||
-          props.api.state.session.permission(id).length > 0,
-      );
-  }
-
-  function commitStatuses() {
-    const local = foldChildBusy(localStatusesFromState(), children);
-    const localWaiting = localWaitingIds();
-    writeOwnStatuses(local, localWaiting);
-    const remotes = readCrossInstance(props.pollMs * 3);
-    const merged = foldChildBusy(mergeBusy(local, remotes), children);
-    setStatuses(merged);
-    setWaitingIds(mergeWaiting(localWaiting, remotes));
-    debugLog(`statuses busy=${[...merged.values()].filter(isBusy).length} waiting=${waitingIds().size}`);
-    props.api.renderer.requestRender();
-  }
-
-  refresh();
-  commitStatuses();
-  const onEvent = () => {
-    refresh();
-    commitStatuses();
+  const scheduleRefresh = () => {
+    if (disposed) return;
+    clearTimeout(debounce);
+    debounce = setTimeout(() => void refresh(), REFRESH_DEBOUNCE_MS);
   };
-  const unsub = props.api.event.on("session.updated", onEvent);
-  const timer = setInterval(() => {
-    refresh();
-    commitStatuses();
-  }, props.pollMs);
 
-  const unsubStatus = props.api.event.on("session.status", () => commitStatuses());
+  const unsubscribe: Array<() => void> = [];
+  for (const type of LIFECYCLE_EVENTS) unsubscribe.push(ctx.data.on(type, scheduleRefresh));
+  unsubscribe.push(
+    ctx.data.on("session.status", (event) => {
+      eventStatus.set(event.data.sessionID, event.data.status);
+      commit();
+    }),
+  );
+  for (const type of ["permission.asked", "permission.replied", "form.created", "form.replied", "form.cancelled"] as const) {
+    unsubscribe.push(
+      ctx.data.on(type, (event) => {
+        waiting = applyWaitingEvent(waiting, event);
+        commit();
+      }),
+    );
+  }
+
+  const timer = setInterval(() => void refresh(), cfg.pollMs);
 
   let watcher: { close(): void } | undefined;
   try {
     ensureStatusDir();
-    watcher = fsWatch(STATUS_DIR, () => {
-      const remotes = readCrossInstance(props.pollMs * 3);
-      setStatuses(foldChildBusy(mergeBusy(localStatusesFromState(), remotes), children));
-      setWaitingIds(mergeWaiting(localWaitingIds(), remotes));
-      props.api.renderer.requestRender();
-    });
+    watcher = fsWatch(STATUS_DIR, () => recompute(readCrossInstance(cfg.pollMs * 3)));
   } catch {
-    // fs.watch unsupported here; POLL_MS interval still reconciles
+    // fs.watch unsupported here; the poll interval still reconciles
   }
 
-  const isWaiting = (id: string) => waitingIds().has(id);
+  return {
+    roots,
+    children,
+    statuses,
+    waitingIds,
+    loading,
+    error,
+    refresh,
+    commit,
+    dispose() {
+      disposed = true;
+      clearInterval(timer);
+      clearTimeout(debounce);
+      watcher?.close();
+      for (const off of unsubscribe) off();
+      removeOwnStatuses();
+    },
+  };
+}
+
+function SidebarSessions(props: {
+  ctx: Context;
+  state: SurfState;
+  sessionID: () => string;
+  spinner: string[];
+  waiting: string[];
+  marker: string;
+  openElsewhere: boolean;
+  combined: boolean;
+  subagents: "collapsed" | "tree";
+  childTtl: number;
+}) {
+  const theme = palette(props.ctx.theme);
+  const { state } = props;
+  const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
+
+  const isWaiting = (id: string) => state.waitingIds().has(id);
 
   const toggleCollapsed = (key: string) => {
     setCollapsed((prev) => {
@@ -766,48 +946,41 @@ function SidebarSessions(props: {
     </box>
   );
 
-  onCleanup(() => {
-    unsub();
-    unsubStatus();
-    clearInterval(timer);
-    watcher?.close();
-  });
-
   // Display order: Active (name-sorted) then Recent (recency) — the same
-  // sequence ctrl+x j/k navigates, so the highlight follows the sidebar.
+  // sequence next/previous navigate, so the highlight follows the sidebar.
   const ordered = createMemo(() =>
-    sidebarOrder(sessions(), statuses(), waitingIds(), props.session_id),
+    sidebarOrder(state.roots(), state.statuses(), state.waitingIds(), props.sessionID()),
   );
   const active = createMemo(() =>
-    ordered().filter((s) => isActiveSession(s, statuses(), waitingIds(), props.session_id)),
+    ordered().filter((s) => isActiveSession(s, state.statuses(), state.waitingIds(), props.sessionID())),
   );
   const activeIds = createMemo(() => new Set(active().map((s) => s.id)));
 
   const recent = createMemo(() => ordered().filter((s) => !activeIds().has(s.id)));
 
-  // Recomputed on refresh changes (children is refilled in refresh() alongside
-  // setSessions, so depending on sessions is enough).
-  const hiddenDupes = createMemo(() => dedupeHiddenIds(children));
+  const hiddenDupes = createMemo(() => dedupeHiddenIds(state.children()));
 
   const renderKids = (s: SidebarSession) =>
     props.subagents === "tree" ? (
       <For
-        each={children.filter(
-          (c) =>
-            c.parentID === s.id &&
-            !hiddenDupes().has(c.id) &&
-            isChildVisible(c, statuses(), waitingIds(), Date.now(), props.childTtl),
-        )}
+        each={state
+          .children()
+          .filter(
+            (c) =>
+              c.parentID === s.id &&
+              !hiddenDupes().has(c.id) &&
+              isChildVisible(c, state.statuses(), state.waitingIds(), Date.now(), props.childTtl),
+          )}
       >
         {(c) => (
           <ChildRow
             child={c}
             waitingFrames={props.waiting}
             spinnerFrames={props.spinner}
-            waiting={() => waitingIds().has(c.id)}
-            working={() => !waitingIds().has(c.id) && isBusy(statuses().get(c.id))}
+            waiting={() => state.waitingIds().has(c.id)}
+            working={() => !state.waitingIds().has(c.id) && isBusy(state.statuses().get(c.id))}
             theme={theme}
-            onNavigate={() => props.api.route.navigate("session", { sessionID: c.id })}
+            onNavigate={() => openSession(props.ctx, c.id)}
           />
         )}
       </For>
@@ -817,16 +990,16 @@ function SidebarSessions(props: {
     <>
       <SessionRow
         s={s}
-        isCurrent={s.id === props.session_id}
+        isCurrent={s.id === props.sessionID()}
         inActive={inActive}
         marker={props.marker}
         waitingFrames={props.waiting}
         spinnerFrames={props.spinner}
         waiting={() => isWaiting(s.id)}
-        working={() => !isWaiting(s.id) && isBusy(statuses().get(s.id))}
-        status={() => statuses().get(s.id)}
+        working={() => !isWaiting(s.id) && isBusy(state.statuses().get(s.id))}
+        status={() => state.statuses().get(s.id)}
         theme={theme}
-        onNavigate={() => props.api.route.navigate("session", { sessionID: s.id })}
+        onNavigate={() => openSession(props.ctx, s.id)}
         openElsewhere={props.openElsewhere}
         combined={props.combined}
       />
@@ -841,22 +1014,22 @@ function SidebarSessions(props: {
           <b>Sessions</b>
         </text>
       </box>
-      <Show when={loading()}>
+      <Show when={state.loading()}>
         <box paddingLeft={1}>
           <text fg={theme.textMuted}>Loading sessions…</text>
         </box>
       </Show>
-      <Show when={!loading() && error()}>
+      <Show when={!state.loading() && state.error()}>
         <box paddingLeft={1}>
-          <text fg={theme.error}>{error()}</text>
+          <text fg={theme.error}>{state.error()}</text>
         </box>
       </Show>
-      <Show when={!loading() && !error() && active().length === 0 && recent().length === 0}>
+      <Show when={!state.loading() && !state.error() && active().length === 0 && recent().length === 0}>
         <box paddingLeft={1}>
           <text fg={theme.textMuted}>No sessions found</text>
         </box>
       </Show>
-      <Show when={!loading() && !error() && active().length > 0}>
+      <Show when={!state.loading() && !state.error() && active().length > 0}>
         <box flexDirection="column">
           {header("active", "Active")}
           <Show when={!collapsed().has("active")}>
@@ -864,7 +1037,7 @@ function SidebarSessions(props: {
           </Show>
         </box>
       </Show>
-      <Show when={!loading() && !error() && recent().length > 0}>
+      <Show when={!state.loading() && !state.error() && recent().length > 0}>
         <box flexDirection="column">
           {header("recent", "Recent")}
           <Show when={!collapsed().has("recent")}>
@@ -876,35 +1049,27 @@ function SidebarSessions(props: {
   );
 }
 
-function currentSessionID(api: TuiPluginApi): string | undefined {
-  const route = api.route.current;
-  if (route.name !== "session") return undefined;
-  const sessionID = (route.params as { sessionID?: unknown } | undefined)?.sessionID;
-  return typeof sessionID === "string" ? sessionID : undefined;
+function currentSessionID(ctx: Context): string | undefined {
+  const route = ctx.ui.router.current();
+  return route.type === "session" ? route.sessionID : undefined;
 }
 
-function navigateRelative(api: TuiPluginApi, delta: 1 | -1): void {
-  const sessions = dbSessions();
+// The sidebar is the session switcher here, so navigation goes straight to the
+// session route rather than through the host's own tab strip.
+function openSession(ctx: Context, sessionID: string): void {
+  ctx.ui.router.navigate({ type: "session", sessionID });
+}
+
+function navigateRelative(ctx: Context, state: SurfState, delta: 1 | -1): void {
+  const sessions = state.roots();
   if (sessions.length === 0) return;
-  const currentID = currentSessionID(api);
+  const currentID = currentSessionID(ctx);
   // Same ordering the sidebar shows (Active name-sorted, then Recent), so
-  // ctrl+x j/k follow what's on screen instead of raw recency.
-  const statuses = new Map<string, SessionStatus>();
-  const waitingIds = new Set<string>();
-  for (const s of sessions) {
-    const st = api.state.session.status(s.id);
-    if (st) statuses.set(s.id, st);
-    if (
-      api.state.session.question(s.id).length > 0 ||
-      api.state.session.permission(s.id).length > 0
-    ) {
-      waitingIds.add(s.id);
-    }
-  }
-  const order = sidebarOrder(sessions, statuses, waitingIds, currentID);
+  // next/previous follow what's on screen instead of raw recency.
+  const order = sidebarOrder(sessions, state.statuses(), state.waitingIds(), currentID);
   const idx = order.findIndex((s) => s.id === currentID);
   const next = order[((idx === -1 ? 0 : idx) + delta + order.length) % order.length];
-  if (next) api.route.navigate("session", { sessionID: next.id });
+  if (next) openSession(ctx, next.id);
 }
 
 // Normalize a user-typed path: expand a leading ~ to the home directory and
@@ -917,72 +1082,40 @@ export function expandPath(input: string): string {
   return resolve(t);
 }
 
-type DirResult = { ok: true } | { ok: false; reason: "db" | "schema" };
-
-let dbw: Database | undefined;
-function getWriteDb(): Database | undefined {
-  if (dbw) return dbw;
-  try {
-    dbw = new Database(DB_PATH, { readwrite: true });
-    dbw.exec("PRAGMA busy_timeout = 10000");
-    return dbw;
-  } catch {
-    return undefined;
-  }
-}
-
-// Point an existing session's row at a new working directory. The server's
-// fork API copies the conversation but has no way to set the fork's directory
-// (fork/update/import all ignore it), so the directory is written straight
-// into opencode.db — a single row update, which the server re-reads per
-// request. Guarded against a missing `directory` column (schema drift).
-export function setSessionDirectory(sessionId: string, directory: string, db?: Database): DirResult {
-  const d = db ?? getWriteDb();
-  if (!d) return { ok: false, reason: "db" };
-  try {
-    const cols = d.query("PRAGMA table_info(session)").all() as unknown[];
-    if (!cols.some((c) => (c as { name: string }).name === "directory")) {
-      return { ok: false, reason: "schema" };
-    }
-    d.query("UPDATE session SET directory = ? WHERE id = ?").run(directory, sessionId);
-    return { ok: true };
-  } catch {
-    return { ok: false, reason: "db" };
-  }
-}
-
-// Leader-chord global action (ctrl+x w): prompt for a new working directory and
-// move the current session into it (see moveSessionDialog). No active session
-// falls back to the dialog id-less guard.
-function changeDirectory(api: TuiPluginApi): void {
-  const id = currentSessionID(api);
+// Leader-chord global action: prompt for a new working directory and move the
+// current session into it (see moveSessionDialog).
+function changeDirectory(ctx: Context, state: SurfState): void {
+  const id = currentSessionID(ctx);
   if (!id) {
-    api.ui.toast({ variant: "warning", message: "No active session" });
+    ctx.ui.toast.show({ variant: "warning", message: "No active session" });
     return;
   }
-  moveSessionDialog(api, id);
+  moveSessionDialog(ctx, state, id);
 }
 
-// Move a session into a chosen directory: fork it through the server API (which
-// copies the full conversation), retarget the new row's directory in the DB,
-// restore the original title, delete the original, and land in the moved
-// session. A custom dialog (like the picker) so Tab can shell-complete paths;
-// enter confirms, esc cancels. Shared by the ctrl+x w command (current session)
-// and the picker's move action (highlighted session).
-function moveSessionDialog(api: TuiPluginApi, id: string): void {
-  const theme = api.theme.current;
-  const me = dbSessions().find((s) => s.id === id);
-  const [path, setPath] = createSignal(me?.directory ?? "");
+function Hint(props: { theme: Palette; keys: string; label: string }) {
+  return (
+    <box flexDirection="row" flexShrink={0} paddingRight={3}>
+      <text fg={props.theme.accent} wrapMode="none">
+        <b>{props.keys}</b>
+      </text>
+      <box width={1} />
+      <text fg={props.theme.textMuted} wrapMode="none">
+        {props.label}
+      </text>
+    </box>
+  );
+}
+
+export function MoveDialog(props: { ctx: Context; state: SurfState; id: string }) {
+  const { ctx, state } = props;
+  const theme = palette(ctx.theme.surface("dialog"));
+  const me = state.roots().find((s) => s.id === props.id) ?? ctx.data.session.get(props.id);
+  const [path, setPath] = createSignal(
+    me ? ("directory" in me ? me.directory : me.location.directory) : "",
+  );
   const [candidates, setCandidates] = createSignal<string[]>([]);
-  let unregisterLayer: (() => void) | undefined;
-  const unregister = () => {
-    unregisterLayer?.();
-    unregisterLayer = undefined;
-  };
-  const close = () => {
-    unregister();
-    api.ui.dialog.clear();
-  };
+  const close = () => ctx.ui.dialog.clear();
   const complete = () => {
     const c = completePath(path());
     setPath(c.value);
@@ -994,92 +1127,73 @@ function moveSessionDialog(api: TuiPluginApi, id: string): void {
     void (async () => {
       try {
         if (!statSync(dir).isDirectory()) {
-          api.ui.toast({ variant: "error", message: "Not a directory" });
+          ctx.ui.toast.show({ variant: "error", message: "Not a directory" });
           return;
         }
-        // Canonicalize symlinks (e.g. /tmp → /private/tmp on macOS) so the stored
-        // directory matches opencode's own realpath form; a symlink path like
-        // "/tmp" doesn't match the server's project dir and the switch silently
-        // fails to land.
+        // Canonicalize symlinks (e.g. /tmp -> /private/tmp on macOS) so the
+        // stored directory matches opencode's own realpath form.
         const canonical = realpathSync(dir);
-        const base = me ? sessionTitle(me) : "Session";
-        const forked = await api.client.session.fork({ sessionID: id });
-        if (!forked.data) {
-          api.ui.toast({ variant: "error", message: "Move failed" });
-          return;
-        }
-        const moved = setSessionDirectory(forked.data.id, canonical);
-        if (!moved.ok) {
-          // Undo the fork so the failed move leaves no stray session behind.
-          void api.client.session.delete({ sessionID: forked.data.id });
-          api.ui.toast({
-            variant: "error",
-            message: moved.reason === "schema" ? "Move failed: unsupported database" : "Move failed",
-          });
-          return;
-        }
-        await api.client.session.update({ sessionID: forked.data.id, title: base });
-        await api.client.session.delete({ sessionID: id });
+        await ctx.client.session.move({ sessionID: props.id, directory: canonical });
         close();
-        api.ui.toast({ variant: "info", message: `Moved to ${shortDir(canonical)}` });
-        api.route.navigate("session", { sessionID: forked.data.id });
-      } catch {
-        api.ui.toast({ variant: "error", message: "Move failed" });
+        ctx.ui.toast.show({ variant: "info", message: `Moved to ${shortDir(canonical)}` });
+        void state.refresh();
+        openSession(ctx, props.id);
+      } catch (e) {
+        ctx.ui.toast.show({ variant: "error", message: `Move failed: ${e instanceof Error ? e.message : String(e)}` });
       }
     })();
   };
-  const hint = (key: string, label: string) => (
-    <box flexDirection="row">
-      <text fg={theme.accent}><b>{key}</b></text>
-      <box width={1} />
-      <text fg={theme.textMuted}>{label}</text>
-      <box width={3} />
+  ctx.keymap.layer(() => ({
+    mode: "modal",
+    priority: 100,
+    commands: [
+      { id: "session_surf.chdir.complete", title: "Complete path", bind: "tab", run: complete },
+      { id: "session_surf.chdir.confirm", title: "Confirm directory", bind: "return", run: confirm },
+      { id: "session_surf.chdir.close", title: "Cancel", bind: "escape", run: close },
+    ],
+  }));
+  return (
+    <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+      <text fg={theme.text}>
+        <b>Move session to directory</b>
+      </text>
+      <box height={1} />
+      <input
+        value={path()}
+        onInput={(v) => {
+          setPath(v);
+          setCandidates([]);
+        }}
+        placeholder="/absolute/path"
+        focused
+      />
+      <Show when={candidates().length > 0}>
+        <box flexDirection="column" paddingTop={1}>
+          <For each={candidates().slice(0, 8)}>
+            {(c) => (
+              <text fg={theme.textMuted} wrapMode="none">
+                {c}
+              </text>
+            )}
+          </For>
+        </box>
+      </Show>
+      <box flexDirection="row" paddingTop={1}>
+        <Hint theme={theme} keys="tab" label="complete" />
+        <Hint theme={theme} keys="enter" label="confirm" />
+        <Hint theme={theme} keys="esc" label="cancel" />
+      </box>
     </box>
   );
-  unregister();
-  api.ui.dialog.setSize("medium");
-  api.ui.dialog.replace(
-    () => (
-      <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <text fg={theme.text}><b>Move session to directory</b></text>
-        <box height={1} />
-        <input
-          value={path()}
-          onInput={(v) => {
-            setPath(v);
-            setCandidates([]);
-          }}
-          placeholder="/absolute/path"
-          focused
-        />
-        <Show when={candidates().length > 0}>
-          <box flexDirection="column" paddingTop={1}>
-            <For each={candidates().slice(0, 8)}>
-              {(c) => <text fg={theme.textMuted} wrapMode="none">{c}</text>}
-            </For>
-          </box>
-        </Show>
-        <box flexDirection="row" paddingTop={1}>
-          {hint("tab", "complete")}
-          {hint("enter", "confirm")}
-          {hint("esc", "cancel")}
-        </box>
-      </box>
-    ),
-    unregister,
-  );
-  unregisterLayer = api.keymap.registerLayer({
-    commands: [
-      { name: "session_surf.chdir.complete", title: "Complete path", run: complete },
-      { name: "session_surf.chdir.confirm", title: "Confirm directory", run: confirm },
-      { name: "session_surf.chdir.close", title: "Cancel", run: close },
-    ],
-    bindings: [
-      { key: "tab", cmd: "session_surf.chdir.complete", desc: "Complete" },
-      { key: "enter", cmd: "session_surf.chdir.confirm", desc: "Confirm" },
-      { key: "esc", cmd: "session_surf.chdir.close", desc: "Cancel" },
-    ],
-  });
+}
+
+// Move a session into a chosen directory through the server's move API (the
+// session keeps its ID). A custom dialog so Tab can shell-complete paths;
+// enter confirms, esc cancels. Shared by the chdir command (current session)
+// and the picker's move action (highlighted session).
+function moveSessionDialog(ctx: Context, state: SurfState, id: string): void {
+  ctx.ui.dialog.show(() => <MoveDialog ctx={ctx} state={state} id={id} />);
+  ctx.ui.dialog.set({ size: "medium" });
 }
 
 // Shell-style tab completion for a path fragment: expand a leading ~, list the
@@ -1171,8 +1285,8 @@ export function applyRename(sessions: SidebarSession[], id: string, title: strin
 type PickerDensity = "compact" | "comfortable";
 
 type PickerTheme = Pick<
-  TuiThemeCurrent,
-  "text" | "textMuted" | "info" | "primary" | "success" | "error" | "selectedListItemText"
+  Palette,
+  "text" | "textMuted" | "info" | "success" | "error" | "selectedListItemText" | "selectedBg"
 >;
 
 // The session list inside the picker. Renders only the visible window of rows,
@@ -1204,21 +1318,12 @@ export function PickerList(props: {
   // estimate until the first layout/resize lands.
   const [measured, setMeasured] = createSignal(0);
   const w = () => (measured() > 0 ? measured() : props.width);
-  const attachMeasure = (el: BoxRenderable) => {
-    const ev = el as unknown as {
-      on(e: string, cb: () => void): void;
-      off(e: string, cb: () => void): void;
-    };
-    // Defer the signal update out of opentui's native "resized" callback:
-    // setting a signal synchronously there re-renders mid-layout and can crash
-    // the native renderer. queueMicrotask lets the layout pass finish first.
-    const update = () => {
-      const width = el.width;
-      queueMicrotask(() => setMeasured((prev) => (prev === width ? prev : width)));
-    };
-    update();
-    ev.on("resized", update);
-    onCleanup(() => ev.off("resized", update));
+  // Defer the signal update out of opentui's native size callback: setting a
+  // signal synchronously there re-renders mid-layout and can crash the native
+  // renderer. queueMicrotask lets the layout pass finish first.
+  const measure = (el: BoxRenderable) => {
+    const width = el.width;
+    queueMicrotask(() => setMeasured((prev) => (prev === width ? prev : width)));
   };
   const rowColor = (s: SidebarSession) => {
     const st = props.statuses.get(s.id);
@@ -1231,7 +1336,15 @@ export function PickerList(props: {
           : props.theme.error;
   };
   return (
-    <box ref={attachMeasure} flexDirection="column" width="100%" height={props.height()}>
+    <box
+      ref={measure}
+      onSizeChange={function (this: BoxRenderable) {
+        measure(this);
+      }}
+      flexDirection="column"
+      width="100%"
+      height={props.height()}
+    >
       <For each={window()}>
         {(row) => {
           const sel = row.i === props.index();
@@ -1243,7 +1356,7 @@ export function PickerList(props: {
             const name = trimEllipsis(sessionTitle(row.s), w());
             const dirText = trimEllipsis(dir, Math.max(0, w() - age.length - 1));
             return (
-              <box flexDirection="column" width="100%" height={2} backgroundColor={sel ? props.theme.primary : undefined} onMouseDown={() => props.onSelect(row.s)}>
+              <box flexDirection="column" width="100%" height={2} backgroundColor={sel ? props.theme.selectedBg : undefined} onMouseDown={() => props.onSelect(row.s)}>
                 <text fg={nameFg} wrapMode="none">{name}</text>
                 <box flexDirection="row" width="100%" justifyContent="space-between">
                   <text fg={metaFg} wrapMode="none">{age}</text>
@@ -1255,7 +1368,7 @@ export function PickerList(props: {
           const right = `${age} ${dir}`;
           const name = trimEllipsis(sessionTitle(row.s), Math.max(0, w() - right.length - 2));
           return (
-            <box flexDirection="row" width="100%" justifyContent="space-between" height={1} backgroundColor={sel ? props.theme.primary : undefined} onMouseDown={() => props.onSelect(row.s)}>
+            <box flexDirection="row" width="100%" justifyContent="space-between" height={1} backgroundColor={sel ? props.theme.selectedBg : undefined} onMouseDown={() => props.onSelect(row.s)}>
               <text fg={nameFg} wrapMode="none">{name}</text>
               <text fg={metaFg} wrapMode="none">{right}</text>
             </box>
@@ -1266,31 +1379,49 @@ export function PickerList(props: {
   );
 }
 
-// The host's DialogSelect only substring-matches option titles, so the picker
-// is a custom dialog instead: a fuzzy-filtered session list with a search
-// input, plus a temporary keymap layer whose bindings (configurable through
-// tui.json's "keybinds" map, defaulting to ctrl+r/d/f, enter, esc, arrows) run
-// the session actions shown in the hint bar at the bottom. Bare keystrokes
-// fall through the layer to the search input, so typing filters the list at
-// all times.
-function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): void {
-  const theme = api.theme.current;
-  const [query, setQuery] = createSignal("");
-  const [sessions, setSessions] = createSignal<SidebarSession[]>(dbSessions());
+type PickerSaved = {
+  query: string;
+  selectedID: string | undefined;
+  titles: Map<string, string>;
+};
+
+const PICKER_HINTS = [
+  { id: "session_surf.picker.rename", label: "rename" },
+  { id: "session_surf.picker.delete", label: "delete" },
+  { id: "session_surf.picker.fork", label: "fork" },
+  { id: "session_surf.picker.new", label: "new" },
+  { id: "session_surf.picker.move", label: "switch workdir" },
+];
+
+function PickerView(props: {
+  ctx: Context;
+  state: SurfState;
+  density: PickerDensity;
+  saved: PickerSaved;
+  reopen: () => void;
+}) {
+  const { ctx, state, saved } = props;
+  const theme = palette(ctx.theme.surface("dialog"));
+  const [query, setQuery] = createSignal(saved.query);
+  const [titles, setTitles] = createSignal(saved.titles);
+  const sessions = createMemo(() =>
+    state.roots().map((s) => (titles().has(s.id) ? { ...s, title: titles().get(s.id)! } : s)),
+  );
   const filtered = createMemo(() => fuzzyRank(query(), sessions()));
-  // Open with the current session highlighted; falls back to the top when it
-  // isn't in the list (e.g. no active session).
-  const [index, setIndex] = createSignal((() => {
-    const id = currentSessionID(api);
-    if (!id) return 0;
-    const i = filtered().findIndex((s) => s.id === id);
-    return i >= 0 ? i : 0;
-  })());
+  // Open with the current (or previously highlighted) session selected; falls
+  // back to the top when it isn't in the list.
+  const [index, setIndex] = createSignal(
+    (() => {
+      const id = saved.selectedID ?? currentSessionID(ctx);
+      if (!id) return 0;
+      const i = filtered().findIndex((s) => s.id === id);
+      return i >= 0 ? i : 0;
+    })(),
+  );
   const selected = () => filtered()[Math.min(index(), filtered().length - 1)];
-  // Starting a search (empty → non-empty query) jumps the highlight to the top
-  // of the results; afterwards only up/down move it. Clearing or changing the
-  // query never re-anchors to the current session.
-  let searchStarted = false;
+  // Starting a search (empty -> non-empty query) jumps the highlight to the top
+  // of the results; afterwards only up/down move it.
+  let searchStarted = saved.query !== "";
   createEffect(() => {
     if (query() !== "") {
       if (!searchStarted) setIndex(0);
@@ -1299,228 +1430,74 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
       searchStarted = false;
     }
   });
-  let unregisterLayer: (() => void) | undefined;
-  const unregister = () => {
-    unregisterLayer?.();
-    unregisterLayer = undefined;
+  const remember = () => {
+    saved.query = query();
+    saved.selectedID = selected()?.id;
   };
-  // Full dismissal (esc / switch). The host's dialog.replace() fires the prior
-  // entry's onClose on every swap, so the picker registers `unregister` (not
-  // `close`) as its onClose — otherwise opening the rename/delete dialog would
-  // trip a full close mid-transition and wedge the dialog stack.
-  const close = () => {
-    unregister();
-    api.ui.dialog.clear();
-  };
+
+  const close = () => ctx.ui.dialog.clear();
   const switchTo = (s: SidebarSession) => {
     close();
-    api.route.navigate("session", { sessionID: s.id });
+    openSession(ctx, s.id);
   };
-  // Re-open the picker (used after rename/delete so the window stays open and
-  // the list reflects the change). Guards against double-registering the layer.
-  const show = () => {
-    unregister();
-    const layer = {
-      commands: [
-        { name: "session_surf.picker.switch", title: "Session Manager", run: () => { const s = selected(); if (s) switchTo(s); } },
-        { name: "session_surf.picker.rename", title: "Rename session", run: doRename },
-        { name: "session_surf.picker.delete", title: "Delete session", run: doDelete },
-        { name: "session_surf.picker.fork", title: "Fork session", run: doFork },
-        { name: "session_surf.picker.move", title: "Move session", run: doMove },
-        { name: "session_surf.picker.new", title: "New session", run: doNew },
-        { name: "session_surf.picker.up", title: "Move up", run: () => setIndex((i) => wrapIndex(i, -1, filtered().length)) },
-        { name: "session_surf.picker.down", title: "Move down", run: () => setIndex((i) => wrapIndex(i, 1, filtered().length)) },
-        { name: "session_surf.picker.close", title: "Close picker", run: close },
-      ],
-      bindings: [
-        { key: "enter", cmd: "session_surf.picker.switch", desc: "Switch" },
-        { key: "ctrl+r", cmd: "session_surf.picker.rename", desc: "Rename" },
-        { key: "ctrl+d", cmd: "session_surf.picker.delete", desc: "Delete" },
-        { key: "ctrl+f", cmd: "session_surf.picker.fork", desc: "Fork" },
-        { key: "ctrl+w", cmd: "session_surf.picker.move", desc: "Move" },
-        { key: "ctrl+n", cmd: "session_surf.picker.new", desc: "New" },
-        { key: "up", cmd: "session_surf.picker.up", desc: "Up" },
-        { key: "ctrl+k", cmd: "session_surf.picker.up", desc: "Up" },
-        { key: "down", cmd: "session_surf.picker.down", desc: "Down" },
-        { key: "ctrl+j", cmd: "session_surf.picker.down", desc: "Down" },
-        { key: "esc", cmd: "session_surf.picker.close", desc: "Close" },
-        ...api.tuiConfig.keybinds.gather("session_surf", [
-          "session_surf.picker.switch",
-          "session_surf.picker.rename",
-          "session_surf.picker.delete",
-          "session_surf.picker.fork",
-          "session_surf.picker.move",
-          "session_surf.picker.new",
-          "session_surf.picker.up",
-          "session_surf.picker.down",
-          "session_surf.picker.close",
-        ]),
-      ],
-    };
-    unregisterLayer = api.keymap.registerLayer(layer);
-    const defaultKeys: Record<string, string> = {
-      "session_surf.picker.switch": "enter",
-      "session_surf.picker.rename": "ctrl+r",
-      "session_surf.picker.delete": "ctrl+d",
-      "session_surf.picker.fork": "ctrl+f",
-      "session_surf.picker.move": "ctrl+w",
-      "session_surf.picker.new": "ctrl+n",
-      "session_surf.picker.close": "esc",
-    };
-    const overrides = api.tuiConfig.keybinds.gather("session_surf", [
-      "session_surf.picker.switch",
-      "session_surf.picker.rename",
-      "session_surf.picker.delete",
-      "session_surf.picker.fork",
-      "session_surf.picker.move",
-      "session_surf.picker.new",
-      "session_surf.picker.close",
-    ]);
-    const hintKey = (cmd: string) => {
-      const b = overrides.find((x) => x.cmd === cmd);
-      return b && typeof b.key === "string" ? b.key : defaultKeys[cmd] ?? cmd;
-    };
-    const hint = (cmd: string, label: string) => {
-      const { suffix } = splitKeybind(hintKey(cmd), label);
-      return (
-        <box flexDirection="row" flexShrink={0} paddingRight={3}>
-          <text fg={theme.accent} wrapMode="none"><b>{hintKey(cmd)}</b></text>
-          {suffix === null ? (
-            <>
-              <box width={1} />
-              <text fg={theme.textMuted} wrapMode="none">{label}</text>
-            </>
-          ) : (
-            <text fg={theme.textMuted} wrapMode="none">{suffix}</text>
-          )}
-        </box>
-      );
-    };
-    // Status per session (local state first, then other instances' broadcasts)
-    // so each row is colored by what that session is doing: idle green, busy
-    // purple, error orange, unknown white.
-    const statuses = new Map<string, SessionStatus>();
-    for (const s of sessions()) {
-      const local = api.state.session.status(s.id);
-      if (local) statuses.set(s.id, local);
-    }
-    for (const r of readCrossInstance()) {
-      for (const [id, st] of Object.entries(r.statuses)) {
-        if (!statuses.has(id)) statuses.set(id, st);
-      }
-    }
-    api.ui.dialog.setSize("xlarge");
-    const rowLines = density === "comfortable" ? 2 : 1;
-    const contentWidth = Math.max(20, Math.min((api.renderer.width || 130) - 10, 114));
-    // Hint bar: merged key+label hints ("ctrl+new") when the key letter is in
-    // the word, spaced otherwise. flexWrap keeps each hint atomic (flexShrink=0)
-    // and spills a whole item to the next row when it doesn't fit.
-    const pickerHints = [
-      { cmd: "session_surf.picker.rename", label: "rename" },
-      { cmd: "session_surf.picker.delete", label: "delete" },
-      { cmd: "session_surf.picker.fork", label: "fork" },
-      { cmd: "session_surf.picker.new", label: "new" },
-      { cmd: "session_surf.picker.move", label: "switch workdir" },
-    ];
-    const maxListHeight = Math.max(3, Math.min(20, (api.renderer.height > 20 ? api.renderer.height : 30) - 10));
-    const listHeight = createMemo(() => Math.min(filtered().length * rowLines, maxListHeight));
-    api.ui.dialog.replace(() => (
-      <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-        <box flexDirection="row" justifyContent="space-between">
-          <text fg={theme.text}><b>Session Manager</b></text>
-          <text fg={theme.textMuted}>esc</text>
-        </box>
-        <box height={1} />
-        <input
-          value={query()}
-          onInput={setQuery}
-          placeholder="Search"
-          focused
-        />
-        <box height={1} />
-        <Show when={filtered().length > 0} fallback={<text fg={theme.textMuted}>No sessions match</text>}>
-          <PickerList
-            sessions={filtered}
-            index={index}
-            statuses={statuses}
-            height={listHeight}
-            width={contentWidth}
-            density={density}
-            theme={theme}
-            onSelect={switchTo}
-          />
-        </Show>
-        <box flexDirection="row" flexWrap="wrap" width="100%" paddingTop={1}>
-          <For each={pickerHints}>{(h) => hint(h.cmd, h.label)}</For>
-        </box>
-      </box>
-    ), unregister);
-  };
+  const fail = (message: string) => ctx.ui.toast.show({ variant: "error", message });
+  const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-  function doRename(): void {
+  // Rename and delete show another dialog, which replaces this one; the picker
+  // is reopened with its search and highlight once that dialog settles.
+  async function doRename(): Promise<void> {
     const s = selected();
     if (!s) return;
-    unregister();
-    api.ui.dialog.replace(() => (
-      <api.ui.DialogPrompt
-        title="Rename session"
-        value={sessionTitle(s)}
-        placeholder="New title"
-        onConfirm={(v) => {
-          const t = v.trim();
-          if (t) {
-            // Optimistic: update the in-memory list right away so the reopened
-            // picker shows the new title instantly; the server call syncs in the
-            // background (the next dbSessions() read reconciles it).
-            setSessions((prev) => applyRename(prev, s.id, t));
-            void api.client.session.update({ sessionID: s.id, title: t });
-          }
-          // Reopen after the host finishes closing its own dialog, otherwise
-          // our replace() is clobbered by the host's post-confirm close.
-          queueMicrotask(show);
-        }}
-        onCancel={() => queueMicrotask(show)}
-      />
-    ));
+    remember();
+    const v = await ctx.ui.dialog.prompt({
+      title: "Rename session",
+      value: sessionTitle(s),
+      placeholder: "New title",
+    });
+    const t = v?.trim();
+    if (t) {
+      saved.titles = new Map(saved.titles).set(s.id, t);
+      void ctx.client.session
+        .update({ sessionID: s.id, title: t })
+        .then(() => state.refresh())
+        .catch((e) => fail(`Rename failed: ${errText(e)}`));
+    }
+    props.reopen();
   }
 
-  function doDelete(): void {
+  async function doDelete(): Promise<void> {
     const s = selected();
     if (!s) return;
-    unregister();
-    api.ui.dialog.replace(() => (
-      <api.ui.DialogConfirm
-        title="Delete session"
-        message={`Delete "${sessionTitle(s)}"? This removes the session and all of its messages.`}
-        onConfirm={() => {
-          void (async () => {
-            await api.client.session.delete({ sessionID: s.id });
-            const remaining = dbSessions();
-            setSessions(remaining);
-            if (currentSessionID(api) === s.id && remaining.length > 0) {
-              api.route.navigate("session", { sessionID: remaining[0].id });
-            }
-          })();
-          // Reopen after the host finishes closing its own dialog.
-          queueMicrotask(show);
-        }}
-        onCancel={() => queueMicrotask(show)}
-      />
-    ));
+    remember();
+    const ok = await ctx.ui.dialog.confirm({
+      title: "Delete session",
+      message: `Delete "${sessionTitle(s)}"? This removes the session and all of its messages.`,
+      label: { confirm: "Delete" },
+    });
+    if (ok) {
+      try {
+        await ctx.client.session.remove({ sessionID: s.id });
+        await state.refresh();
+        const remaining = state.roots();
+        if (currentSessionID(ctx) === s.id && remaining.length > 0) openSession(ctx, remaining[0].id);
+      } catch (e) {
+        fail(`Delete failed: ${errText(e)}`);
+      }
+    }
+    props.reopen();
   }
 
   function doNew(): void {
     close();
     void (async () => {
       try {
-        const created = await api.client.session.create({});
-        if (!created.data) {
-          api.ui.toast({ variant: "error", message: "Session create failed" });
-          return;
-        }
-        api.route.navigate("session", { sessionID: created.data.id });
-      } catch {
-        api.ui.toast({ variant: "error", message: "Session create failed" });
+        const created = await ctx.client.session.create({
+          location: { directory: (ctx.location ?? ctx.data.location.default()).directory },
+        });
+        void state.refresh();
+        openSession(ctx, created.id);
+      } catch (e) {
+        fail(`Session create failed: ${errText(e)}`);
       }
     })();
   }
@@ -1531,24 +1508,15 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
     close();
     void (async () => {
       try {
-        const msgs = await api.client.session.messages({ sessionID: s.id, limit: 1 });
-        const last = msgs.data?.[0];
-        if (!last) {
-          api.ui.toast({ variant: "warning", message: "This session has no messages to fork" });
-          return;
-        }
-        const forked = await api.client.session.fork({ sessionID: s.id, messageID: last.info.id });
-        if (!forked.data) {
-          api.ui.toast({ variant: "error", message: "Fork failed" });
-          return;
-        }
-        await api.client.session.update({
-          sessionID: forked.data.id,
-          title: forkTitle(sessionTitle(s), dbSessions()),
+        const forked = await ctx.client.session.fork({ sessionID: s.id });
+        await ctx.client.session.update({
+          sessionID: forked.id,
+          title: forkTitle(sessionTitle(s), sessions()),
         });
-        api.route.navigate("session", { sessionID: forked.data.id });
-      } catch {
-        api.ui.toast({ variant: "error", message: "Fork failed" });
+        void state.refresh();
+        openSession(ctx, forked.id);
+      } catch (e) {
+        fail(`Fork failed: ${errText(e)}`);
       }
     })();
   }
@@ -1556,120 +1524,200 @@ function openPicker(api: TuiPluginApi, density: PickerDensity = "comfortable"): 
   function doMove(): void {
     const s = selected();
     if (!s) return;
-    // unregister (not close): close() clears the whole dialog stack, which drops
-    // focus back to the main chat input. moveSessionDialog does its own in-place
-    // dialog.replace, so the workdir input keeps focus (mirrors doRename).
-    unregister();
-    moveSessionDialog(api, s.id);
+    moveSessionDialog(ctx, state, s.id);
   }
 
-  show();
+  ctx.keymap.layer(() => ({
+    mode: "modal",
+    priority: 100,
+    commands: [
+      { id: "session_surf.picker.switch", title: "Session Manager", bind: "return", run: () => { const s = selected(); if (s) switchTo(s); } },
+      { id: "session_surf.picker.rename", title: "Rename session", bind: "ctrl+r", run: doRename },
+      { id: "session_surf.picker.delete", title: "Delete session", bind: "ctrl+d", run: doDelete },
+      { id: "session_surf.picker.fork", title: "Fork session", bind: "ctrl+f", run: doFork },
+      { id: "session_surf.picker.move", title: "Move session", bind: "ctrl+w", run: doMove },
+      { id: "session_surf.picker.new", title: "New session", bind: "ctrl+n", run: doNew },
+      { id: "session_surf.picker.up", title: "Move up", bind: "up,ctrl+k", run: () => setIndex((i) => wrapIndex(i, -1, filtered().length)) },
+      { id: "session_surf.picker.down", title: "Move down", bind: "down,ctrl+j", run: () => setIndex((i) => wrapIndex(i, 1, filtered().length)) },
+      { id: "session_surf.picker.close", title: "Close picker", bind: "escape", run: close },
+    ],
+  }));
+
+  // Status per session (this TUI's, plus other instances' broadcasts), so each
+  // row is colored by what that session is doing: idle green, busy purple,
+  // error orange, unknown white.
+  const statuses = state.statuses();
+  const hintKey = (id: string) => ctx.keymap.shortcuts(id)[0] ?? "";
+  const hint = (id: string, label: string) => {
+    const { suffix } = splitKeybind(hintKey(id), label);
+    return (
+      <box flexDirection="row" flexShrink={0} paddingRight={3}>
+        <text fg={theme.accent} wrapMode="none">
+          <b>{hintKey(id)}</b>
+        </text>
+        {suffix === null ? (
+          <>
+            <box width={1} />
+            <text fg={theme.textMuted} wrapMode="none">
+              {label}
+            </text>
+          </>
+        ) : (
+          <text fg={theme.textMuted} wrapMode="none">
+            {suffix}
+          </text>
+        )}
+      </box>
+    );
+  };
+  const rowLines = props.density === "comfortable" ? 2 : 1;
+  const contentWidth = Math.max(20, Math.min((ctx.renderer.width || 130) - 10, 114));
+  const maxListHeight = Math.max(3, Math.min(20, (ctx.renderer.height > 20 ? ctx.renderer.height : 30) - 10));
+  const listHeight = createMemo(() => Math.min(filtered().length * rowLines, maxListHeight));
+
+  return (
+    <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+      <box flexDirection="row" justifyContent="space-between">
+        <text fg={theme.text}>
+          <b>Session Manager</b>
+        </text>
+        <text fg={theme.textMuted}>esc</text>
+      </box>
+      <box height={1} />
+      <input value={query()} onInput={setQuery} placeholder="Search" focused />
+      <box height={1} />
+      <Show when={filtered().length > 0} fallback={<text fg={theme.textMuted}>No sessions match</text>}>
+        <PickerList
+          sessions={filtered}
+          index={index}
+          statuses={statuses}
+          height={listHeight}
+          width={contentWidth}
+          density={props.density}
+          theme={theme}
+          onSelect={switchTo}
+        />
+      </Show>
+      <box flexDirection="row" flexWrap="wrap" width="100%" paddingTop={1}>
+        <For each={PICKER_HINTS}>{(h) => hint(h.id, h.label)}</For>
+      </box>
+    </box>
+  );
 }
 
-const plugin: TuiPluginModule = {
+// The host's select dialog has fixed key handling and no fuzzy ranking, so the
+// picker is a custom dialog: a fuzzy-filtered session list with a search input,
+// plus a modal keymap layer whose commands (rebindable through cli.json's
+// "keybinds" map) run the session actions shown in the hint bar. Bare
+// keystrokes fall through to the search input, so typing always filters.
+function openPicker(
+  ctx: Context,
+  state: SurfState,
+  density: PickerDensity = "comfortable",
+  saved: PickerSaved = { query: "", selectedID: undefined, titles: new Map() },
+): void {
+  void state.refresh();
+  ctx.ui.dialog.show(() => (
+    <PickerView
+      ctx={ctx}
+      state={state}
+      density={density}
+      saved={saved}
+      reopen={() => queueMicrotask(() => openPicker(ctx, state, density, saved))}
+    />
+  ));
+  ctx.ui.dialog.set({ size: "xlarge" });
+}
+
+export default Plugin.define({
   id: "opencode-session-surf",
-  tui: async (api, options) => {
-    setDebug(options?.debug === true);
+  setup(ctx) {
+    const options = ctx.options;
+    setDebug(options.debug === true);
     debugLog(`module-loaded url=${import.meta.url}`);
-    const spinner = framesFor(SPINNERS, options?.spinner, SPINNERS.dots);
-    const waiting = framesFor(WAITERS, options?.waiting, WAITERS.pulse);
-    const marker = markerGlyph(options?.marker);
-    const openElsewhere = options?.openElsewhere === true;
+    const spinner = framesFor(SPINNERS, options.spinner, SPINNERS.dots);
+    const waiting = framesFor(WAITERS, options.waiting, WAITERS.pulse);
+    const marker = markerGlyph(options.marker);
+    const openElsewhere = options.openElsewhere === true;
     // Presets define the whole look and override the individual style
     // options; unknown preset names fall back to the individual options.
-    const preset = typeof options?.preset === "string" ? PRESETS[options.preset] : undefined;
+    const preset = typeof options.preset === "string" ? PRESETS[options.preset] : undefined;
     const spinnerFrames = preset?.spinner ?? spinner;
     const waitingFrames = preset?.waiting ?? waiting;
     const markerGlyphName = preset?.marker ?? marker;
     const combined = preset?.combined ?? false;
-    const pollMs = typeof options?.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
+    const pollMs = typeof options.pollMs === "number" && options.pollMs >= 1000 ? options.pollMs : POLL_MS;
     // Picker row layout: "compact" (one line) or "comfortable" (two lines).
-    const density: PickerDensity = options?.density === "compact" ? "compact" : "comfortable";
+    const density: PickerDensity = options.density === "compact" ? "compact" : "comfortable";
     // Subagent display: "collapsed" hides children but folds their busy state
     // into the parent; "tree" (default) also renders an indented row per child
     // with its own status.
-    const subagents: "collapsed" | "tree" = options?.subagents === "collapsed" ? "collapsed" : "tree";
+    const subagents: "collapsed" | "tree" = options.subagents === "collapsed" ? "collapsed" : "tree";
     // How long a completed subagent row stays visible after going idle before
     // it is hidden (freshness window); values below 1000 are ignored.
-    const childTtl = typeof options?.childTtlMs === "number" && options.childTtlMs >= 1000 ? options.childTtlMs : CHILD_TTL_MS;
-    api.slots.register({
-      order: 300,
-      slots: {
-        sidebar_content(_ctx, props) {
-          return (
-            <SidebarSessions
-              api={api}
-              session_id={props.session_id}
-              spinner={spinnerFrames}
-              waiting={waitingFrames}
-              marker={markerGlyphName}
-              pollMs={pollMs}
-              openElsewhere={openElsewhere}
-              combined={combined}
-              subagents={subagents}
-              childTtl={childTtl}
-            />
-          );
-        },
-      },
+    const childTtl = typeof options.childTtlMs === "number" && options.childTtlMs >= 1000 ? options.childTtlMs : CHILD_TTL_MS;
+
+    const state = createSurfState(ctx, { pollMs });
+    void state.refresh();
+
+    ctx.ui.slot({
+      append: "sidebar.content",
+      render: (input) => (
+        <SidebarSessions
+          ctx={ctx}
+          state={state}
+          sessionID={() => input.sessionID}
+          spinner={spinnerFrames}
+          waiting={waitingFrames}
+          marker={markerGlyphName}
+          openElsewhere={openElsewhere}
+          combined={combined}
+          subagents={subagents}
+          childTtl={childTtl}
+        />
+      ),
     });
 
-    // Keybinds are configurable via tui.json's "keybinds" map, keyed by
-    // command name (e.g. {"session_surf.next": "ctrl+]"}); ctrl+o and
-    // ctrl+x j/k are the hardcoded defaults (vim-style), overridable per user.
-    api.keymap.registerLayer({
+    // Keybinds are rebindable through cli.json's "keybinds" map, keyed by
+    // command id (e.g. {"session_surf.next": "ctrl+]"}); "none" disables one.
+    ctx.keymap.layer(() => ({
+      priority: 10,
       commands: [
         {
-          name: "session_surf.picker.open",
+          id: "session_surf.picker.open",
           title: "Session Manager",
-          category: "Session",
-          namespace: "palette",
-          run() {
-            openPicker(api, density);
-          },
+          group: "Session",
+          palette: true,
+          bind: "ctrl+o",
+          run: () => openPicker(ctx, state, density),
         },
         {
-          name: "session_surf.next",
+          id: "session_surf.next",
           title: "Next session",
-          category: "Session",
-          namespace: "palette",
-          run() {
-            navigateRelative(api, 1);
-          },
+          group: "Session",
+          palette: true,
+          bind: "<leader>j",
+          run: () => navigateRelative(ctx, state, 1),
         },
         {
-          name: "session_surf.previous",
+          id: "session_surf.previous",
           title: "Previous session",
-          category: "Session",
-          namespace: "palette",
-          run() {
-            navigateRelative(api, -1);
-          },
+          group: "Session",
+          palette: true,
+          bind: "<leader>k",
+          run: () => navigateRelative(ctx, state, -1),
         },
         {
-          name: "session_surf.chdir",
+          id: "session_surf.chdir",
           title: "Move session to directory",
-          category: "Session",
-          namespace: "palette",
-          run() {
-            changeDirectory(api);
-          },
+          group: "Session",
+          palette: true,
+          bind: "<leader>d",
+          run: () => changeDirectory(ctx, state),
         },
       ],
-      bindings: [
-        { key: "ctrl+o", cmd: "session_surf.picker.open", desc: "Open session picker" },
-        { key: "ctrl+xj", cmd: "session_surf.next", desc: "Next session" },
-        { key: "ctrl+xk", cmd: "session_surf.previous", desc: "Previous session" },
-        { key: "ctrl+xw", cmd: "session_surf.chdir", desc: "Move to directory" },
-        ...api.tuiConfig.keybinds.gather("session_surf", [
-          "session_surf.picker.open",
-          "session_surf.next",
-          "session_surf.previous",
-          "session_surf.chdir",
-        ]),
-      ],
-    });
-  },
-};
+    }));
 
-export default plugin;
+    return () => state.dispose();
+  },
+});
